@@ -1,0 +1,14 @@
+{
+  "name": "Librescence — Apprendre libre. Grandir ensemble.",
+  "short_name": "Librescence",
+  "description": "Découvrir un domaine, apprendre à son rythme et réaliser des projets.",
+  "lang": "fr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f3eb",
+  "theme_color": "#10172f",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

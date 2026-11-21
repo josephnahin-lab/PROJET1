@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Librescence aide chacun à découvrir un domaine, apprendre librement une compétence et faire grandir ses projets.">
+  <meta name="theme-color" content="#10172f">
+  <title>Librescence — Apprendre libre. Grandir ensemble.</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="manifest" href="manifest.webmanifest">
+  <script src="config.js" defer></script>
+  <script src="guided-pathways.js" defer></script>
+  <script src="script.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Aller au contenu principal</a>
+  <header class="site-header">
+    <a class="brand" href="#home" aria-label="Librescence, accueil"><span class="brand-mark" aria-hidden="true">L.</span><span>Librescence</span></a>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="main-nav" aria-label="Ouvrir le menu">☰</button>
+    <nav id="main-nav" class="main-nav" aria-label="Navigation principale">
+      <button class="nav-link" type="button" data-route="catalog">Domaines</button>
+      <button class="nav-link" type="button" data-route="saved">Ma bibliothèque</button>
+      <button class="nav-link" type="button" data-route="progress">Ma progression</button>
+      <button class="nav-link" type="button" data-route="review">Réviser mes quiz</button>
+      <button class="nav-link" type="button" data-route="portfolio">Mon portfolio</button>
+      <button class="nav-link" type="button" data-route="about">À propos</button>
+      <button class="nav-link" type="button" data-route="community">Communauté</button>
+      <button class="nav-link" type="button" data-route="profile">Mon profil</button>
+      <button class="nav-link" type="button" data-action="speak-guide" aria-label="Écouter le guide de la page">Écouter l’aide</button>
+    </nav>
+  </header>
+  <div id="connection-status" class="connection-status" role="status" aria-live="polite" hidden></div>
+
+  <main id="main" tabindex="-1">
+    <div id="app" aria-live="polite">
+      <section class="book-screen">
+        <button class="book-button" type="button" data-action="open-book" aria-label="Ouvrir le livre Librescence">
+          <span class="book-glow" aria-hidden="true"></span>
+          <span class="book" aria-hidden="true">
+            <span class="book-cover-left"><span class="cover-mark">L.</span></span>
+            <span class="book-cover-right"><span class="cover-sun"></span></span>
+            <span class="book-pages"></span>
+            <span class="book-spine"></span>
+          </span>
+        </button>
+        <p class="book-instruction">Clique sur le livre pour l’ouvrir</p>
+        <button class="book-skip" type="button" data-action="skip-book">Passer l’ouverture</button>
+      </section>
+      <noscript><p class="notice notice-warning">Active JavaScript pour parcourir les domaines et les cours. L’animation du livre n’est pas nécessaire.</p></noscript>
+    </div>
+  </main>
+
+  <dialog id="orientation-dialog" class="dialog" aria-labelledby="orientation-title">
+    <form id="orientation-form" class="dialog-content">
+      <div class="dialog-head"><div><p class="eyebrow">SANS OBLIGATION</p><h2 id="orientation-title" tabindex="-1">Partons de tes envies.</h2><p>Ces réponses servent seulement à t’orienter et ne sont pas enregistrées. Tu peux aussi tout passer.</p></div><button class="icon-button" type="button" data-close-dialog aria-label="Fermer">×</button></div>
+      <label class="field-label" for="interest-select">Quel sujet t’attire ?</label><select id="interest-select" name="interest"><option value="">Je préfère choisir moi-même</option></select>
+      <label class="field-label" for="level-select">Où en es-tu ?</label><select id="level-select" name="level"><option value="">Je ne sais pas encore</option><option>Je débute</option><option>J’ai déjà essayé</option><option>Je pratique déjà</option></select>
+      <label class="field-label" for="goal-select">Qu’aimerais-tu faire ?</label><select id="goal-select" name="goal"><option value="">Je veux explorer</option><option>Apprendre une compétence</option><option>Réaliser un projet</option><option>Découvrir des métiers</option></select>
+      <label class="field-label" for="time-select">Quel rythme te convient ?</label><select id="time-select" name="time"><option value="">À mon rythme</option><option>Quelques minutes par jour</option><option>Quelques heures par semaine</option><option>Je préfère un programme libre</option></select>
+      <div class="dialog-actions"><button class="button button-primary" type="submit">Voir les domaines</button><button class="button button-quiet" type="button" data-action="skip-orientation">Passer les questions</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="video-dialog" class="dialog video-dialog" aria-labelledby="video-title">
+    <div class="dialog-content"><div class="dialog-head"><div><p class="eyebrow">LECTURE INTÉGRÉE · SANS QUITTER LIBRESCENCE</p><h2 id="video-title" tabindex="-1">Vidéo du cours</h2><p>Les vidéos dont l’auteur autorise l’intégration se lisent ici. Si YouTube bloque une vidéo, le lien de secours s’ouvrira sur YouTube.</p></div><button class="icon-button" type="button" data-close-video aria-label="Fermer la vidéo">×</button></div><div class="video-frame-wrap"><iframe id="video-frame" title="Vidéo YouTube intégrée" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div><a id="video-fallback" class="button button-outline video-fallback" target="_blank" rel="noopener noreferrer">Si la lecture ne démarre pas, ouvrir sur YouTube</a></div>
+  </dialog>
+
+  <footer class="site-footer"><a class="brand" href="#home"><span class="brand-mark" aria-hidden="true">L.</span><span>Librescence</span></a><p>Apprendre libre. Grandir ensemble.</p><nav aria-label="Informations"><button type="button" data-route="about">À propos</button><button type="button" data-route="contact">Contact</button><button type="button" data-route="privacy">Confidentialité</button><button type="button" data-route="community">Communauté</button></nav><span>Les parcours « Contenu en préparation » ne sont pas des formations disponibles.</span></footer>
+</body>
+</html>
