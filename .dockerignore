@@ -1,0 +1,10 @@
+.git
+.github
+docs
+**/node_modules
+**/vendor
+**/.next
+**/.env
+**/.env.*
+**/*.sqlite
+**/.mcp.json

@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compose-config:
+    name: Validate Docker Compose
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        env:
+          POSTGRES_PASSWORD: compose-validation-only
+        run: docker compose config --quiet
+
+  docker-build:
+    name: Build Compose images
+    needs: compose-config
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      POSTGRES_PASSWORD: compose-validation-only
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Build backend and frontend images
+        run: docker compose build backend frontend
+
+  backend:
+    name: Laravel checks
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: librescence_test
+          POSTGRES_USER: librescence_test
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U librescence_test -d librescence_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_DATABASE: librescence_test
+      DB_USERNAME: librescence_test
+      DB_PASSWORD: ci-only-password
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Validate and test Laravel application when present
+        run: |
+          if [ ! -f backend/composer.json ]; then
+            echo "Laravel manifest not present yet; backend checks skipped."
+            exit 0
+          fi
+
+          composer validate --no-check-publish --working-dir=backend
+          if [ ! -f backend/composer.lock ]; then
+            echo "composer.lock is missing; dependency-based Laravel tests skipped."
+            exit 0
+          fi
+
+          composer install --no-interaction --prefer-dist --no-progress --working-dir=backend
+          if [ -f backend/artisan ]; then
+            php backend/artisan test
+          else
+            echo "Laravel artisan entry point not present; application tests skipped."
+          fi
+
+  frontend:
+    name: Next.js checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        if: ${{ hashFiles('frontend/package.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install and verify Next.js application when present
+        run: |
+          if [ ! -f frontend/package.json ]; then
+            echo "Next.js manifest not present yet; frontend checks skipped."
+            exit 0
+          fi
+          if [ ! -f frontend/package-lock.json ]; then
+            echo "package-lock.json is missing; npm-based frontend checks skipped."
+            exit 0
+          fi
+
+          cd frontend
+          npm ci
+          npm run lint --if-present
+          npm run typecheck --if-present
+          npm run build --if-present

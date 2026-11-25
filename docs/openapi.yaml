@@ -1,0 +1,4405 @@
+openapi: 3.1.0
+info:
+  title: Librescence API
+  version: 1.0.0
+  summary: Contrat HTTP versionné de Librescence
+  description: |
+    API REST de l’application Librescence. L’interface conserve un mode invité
+    local utilisable sans compte. Les contenus publiquement lisibles sont
+    exclusivement ceux ayant été explicitement publiés. Le contrat ne décrit
+    pas une implémentation déjà déployée.
+    Pour le Next.js first-party, Sanctum utilise exclusivement un cookie de
+    session HttpOnly et le flux CSRF décrit ci-dessous; aucun bearer token
+    n’est remis au navigateur. Les certificats sont désactivés et leurs
+    opérations d’émission/vérification différées jusqu’à approbation des règles.
+  contact:
+    name: Équipe Librescence
+  x-deferred-operations:
+    - operation: Émission, liste et vérification de certificats
+      reason: Décision requise sur critères d’admissibilité, contenu de preuve et conservation.
+    - operation: Sessions, soumission et historique persistant des quiz
+      reason: Désactivés jusqu’à approbation d’une politique de rétention.
+    - operation: Stockage et consultation des demandes de contact
+      reason: Désactivés jusqu’à approbation d’une politique de rétention.
+servers:
+  - url: /api/v1
+    description: API versionnée
+x-rate-limits:
+  csrfBootstrap: 60/minute/IP HMAC (proposition)
+  register: 3/15 minutes/IP HMAC (proposition)
+  login: 5/15 minutes/IP HMAC + identifiant normalisé (proposition)
+  logout: 30/minute/session; ne pas bloquer la première fermeture (proposition)
+  forgotPassword: 3/hour/IP HMAC + identifiant normalisé (proposition)
+  resetPassword: 5/hour/IP HMAC + identifiant normalisé (proposition)
+  sendVerification: 3/hour/account (proposition)
+  verifyEmail: 10/hour/IP HMAC (proposition)
+  reauthenticate: 5/15 minutes/account + IP HMAC (proposition)
+  deleteAccount: 2/day/account (proposition)
+  deletionStatus: 20/hour/status token (proposition; durée du jeton à décider)
+  profileRead: 120/minute/account (limite de lecture de compte, accountRead)
+  accountWrite: 30/minute/account
+  domainList: 60/minute/IP HMAC (proposition)
+  domainRead: 60/minute/IP HMAC (proposition)
+  pathwayRead: 60/minute/IP HMAC (proposition)
+  catalogSearch: 30/minute/IP HMAC (proposition)
+  recommendations: 20/minute/IP HMAC (proposition)
+  quizRead: 60/minute/IP HMAC (proposition)
+  guestQuizSession: 10/hour/IP HMAC (proposition; inactive tant que la session quiz est désactivée)
+  guestQuizSubmit: 10/minute/IP HMAC et 5/minute/session/quiz (proposition; inactive tant que les tentatives sont désactivées)
+  guestImport: 1/hour/account (proposition; plafond de taille distinct à décider)
+  reminderUnsubscribe: 10/hour/IP HMAC (proposition; token valide idempotent)
+  contactSubmit: 3/hour et 5/day/IP HMAC (proposition; inactive tant que le stockage contact est désactivé)
+  portfolioUpload: 10/hour/account
+  adminRead: 60/minute/account (proposition)
+  adminWrite: 60/minute/account (proposition)
+  note: |
+    profileRead (lecture de compte, appelée accountRead dans cette note),
+    accountWrite et portfolioUpload sont les limites initiales approuvées et
+    effectivement appliquées aux opérations annotées. Valeurs initiales :
+    120/minute/account pour profileRead, 30/minute/account pour accountWrite,
+    10/hour/account pour portfolioUpload. Elles sont révisables par configuration
+    et mesure sans supprimer la limitation. Les clés de ces limites sont liées
+    au compte authentifié, jamais à l’IP brute; utiliser un limiteur partagé.
+    Les autres valeurs restent des propositions ou sont inactives selon leur
+    description; elles ne deviennent pas actives par simple présence ici.
+    Si une limite active est atteinte, répondre 429 avec Retry-After. Les limites
+    guestQuizSession, guestQuizSubmit et contactSubmit ne sont pas appliquées
+    pendant la désactivation : ces routes retournent 503 avant leur traitement.
+x-browser-security:
+  csrf-bootstrap: GET /api/v1/auth/csrf-cookie
+  session-cookie: HttpOnly; Secure en HTTPS; SameSite=Lax; Path=/
+  csrf-cookie: XSRF-TOKEN (non HttpOnly, lisible par le client first-party uniquement)
+  csrf-header: X-XSRF-TOKEN
+  csrf-required-for: Toutes les opérations POST, PUT, PATCH et DELETE du client navigateur first-party, y compris les routes non authentifiées; l’exigence d’authentification Sanctum est distincte de la vérification CSRF.
+  csrf-sequence: Après GET /auth/csrf-cookie, décoder XSRF-TOKEN et l’envoyer dans X-XSRF-TOKEN; inclure les cookies de session pour Sanctum. La réponse de login/register établit la session cookie, jamais un bearer.
+  security-semantics: Les exigences security des opérations indiquent l’identité (cookie Sanctum, session de quiz ou jeton de suivi); la règle CSRF ci-dessus s’applique en plus, même quand l’opération ne liste pas ce header comme mécanisme d’identité.
+  browser-requests: >-
+    Inclure credentials; CORS limité à l’origine first-party approuvée; jamais
+    de wildcard avec credentials. Exposer explicitement ETag avec
+    Access-Control-Expose-Headers: ETag (sans wildcard) pour que le navigateur
+    puisse lire le validateur; autoriser If-Match dans Access-Control-Allow-Headers.
+    Pour le téléchargement des pièces jointes portfolio, exposer également
+    Content-Disposition afin de lire le nom de fichier; cette réponse ne requiert
+    pas ETag.
+    CsrfToken définit la valeur et le format du header exigé par la règle ci-dessus.
+  json-body-policy: >-
+    Pour toute opération apprenant dont le corps est JSON, accepter uniquement
+    Content-Type application/json (paramètres de charset permis); sinon répondre
+    415 application/problem+json sans interpréter ni traiter le corps. Cela couvre
+    notamment PATCH/PUT/POST profile, progress, lesson-progress, project-progress,
+    notes, saved-resources, weekly-goal, guest-state import, fiches portfolio,
+    préférences de rappel et désinscription de rappel; cela ne concerne pas GET,
+    DELETE sans corps, multipart/form-data de téléversement, ni les routes
+    désactivées qui répondent 503 avant traitement.
+x-source-inventory:
+  description: |
+    Comptages source audités; ce manifeste décrit l'inventaire, jamais le contenu
+    effectivement publié. canonicalSourceDomainIds signifie IDs source distincts
+    parmi les 250 occurrences. Runtime resolution order est strict : filtre raw
+    family active, applique domainAliases (hors paires identity), puis merge.
+    Les mappings de familles historiques restent proposés, non appliqués.
+  rawDomainRecords: 250
+  canonicalSourceDomainIds: 192
+  distinctSourceDomainIds: 192
+  runtimeVisibleDomainIds: 101
+  runtimeResolutionOrder: [filter_raw_family_active, resolve_domain_alias, merge_by_resolved_id]
+  domainAliasSource: script.js:domainAliases; compare the exact key-target map with the seed manifest
+  runtimeVisibleBreakdown:
+    guided: 100
+    specializedIt: 10
+    generatedGeneric: 90
+    web: 1
+  historicalFamilyAliases:
+    count: 7
+    affectedRawRecords: 76
+    initialStatus: proposed
+    appliedToCanonicalFamily: false
+    initialDisposition: quarantined_non_public
+    recordCounts:
+      hospitality: 12
+      technical: 11
+      agriculture: 11
+      education: 11
+      civic: 11
+      science: 10
+      health: 10
+  domainIdIdentityAliases:
+    count: 2
+    pairs:
+      - [gestion-equipe, gestion-equipe]
+      - [gestion-projet, gestion-projet]
+    resolution: identity_noop_outside_alias_graph
+  domainTrackKeys:
+    count: 98
+    canonicalKeys: 90
+    aliasSourceKeys: 8
+    weeksPerKey: 4
+    canonicalTopicRows: 360
+    aliasTopicSourceRows: 32
+    aliasPairs:
+      social-entrepreneurship: entrepreneuriat-social
+      team-management: gestion-equipe
+      project-management: gestion-projet
+      content-creation: creation-contenu
+      content: creation-contenu
+      photography: photo
+      media-education: education-medias
+      professional-communication: communication-professionnelle
+  uuidv5SeedIds:
+    namespace: 6ba7b811-9dad-11d1-80b4-00c04fd430c8
+    rootNamePattern: urn:librescence:content:v1/{entityType}/{canonicalSourceKey}/v{version}
+    childNamePattern: urn:librescence:content:v1/{entityType}/{parentCanonicalSourceKey}/{stableKey}/v{version}
+    randomOrFallbackIds: forbidden
+  initialSourceReviewStatus: review_required
+  genericFamilyTemplates:
+    count: 11
+    weeksPerTemplate: 4
+    sourceQuestions: 44
+    sourceOptions: 132
+    stagesPerWeek: 3
+    generatedPathways: 90
+    weeksPerGeneratedPathway: 4
+    sessionsPerGeneratedPathway: 12
+    quizzesPerGeneratedPathway: 12
+    questionsPerGeneratedPathway: 12
+    optionsPerQuestion: 3
+    generatedQuestionOptions: 3240
+    publicationDefault: draft
+  specializedItPathways:
+    count: 10
+    weeksPerPathway: 4
+    sessionsPerPathway: 4
+    quizzesPerPathway: 4
+    questionsPerPathway: 8
+    totalOptions: 313
+    optionValidation: source-exact-per-question
+  webPathway:
+    modules: 4
+    sessions: 12
+    quizzes: 12
+    questions: 24
+    totalOptions: 72
+    optionValidation: source-exact-per-question
+  editorialRule: Source presence, migration completion, role assignment, and status alone never publish unreviewed content.
+x-authorization-tests:
+  - operationId: adminRegisterContentSource
+    actor: unauthenticated
+    expectedStatus: 401
+  - operationId: adminRegisterContentSource
+    actor: content_editor
+    request: licenseStatus=approved_or_rejected
+    expectedStatus: 422
+    sideEffect: no source or audit row
+  - operationId: reviewContentSource
+    actor: content_editor
+    expectedStatus: 403
+    sideEffect: no status transition
+  - operationId: publishPathway
+    actor: content_editor
+    expectedStatus: 403
+    sideEffect: no publication
+  - operationId: publishResource
+    actor: content_editor
+    expectedStatus: 403
+    sideEffect: no publication
+  - operationId: publishPathway
+    actor: content_approver
+    request: missing_or_unapproved_or_unaudited_source
+    expectedStatus: 409
+    sideEffect: no partial publication
+  - operationId: publishResource
+    actor: content_approver
+    request: missing_or_unapproved_or_unaudited_source
+    expectedStatus: 409
+    sideEffect: no partial publication
+tags:
+  - name: Auth
+  - name: Catalogue
+  - name: Quiz
+  - name: Mon espace
+  - name: Portfolio
+  - name: Rappels
+  - name: Contact
+  - name: Administration
+security: []
+paths:
+  /auth/csrf-cookie:
+    get:
+      tags: [Auth]
+      operationId: bootstrapCsrf
+      summary: Initialiser les cookies de session et CSRF Sanctum
+      description: |
+        Établit le cookie de session HttpOnly et le cookie XSRF-TOKEN nécessaire
+        au client navigateur first-party. Le client renvoie la valeur décodée de
+        XSRF-TOKEN dans X-XSRF-TOKEN pour toute requête POST, PUT, PATCH ou DELETE.
+        Cette route et les mutations authentifiées ne prennent jamais de bearer
+        token; les credentials navigateur sont inclus dans la requête.
+      security: []
+      x-rate-limit: csrfBootstrap
+      responses:
+        '204':
+          description: Cookies de session/CSRF initialisés.
+          headers:
+            Set-Cookie:
+              schema: { type: array, items: { type: string } }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Créer un compte facultatif
+      description: Inscription limitée par débit. La date de naissance n’est pas demandée. La création de compte n’est pas nécessaire pour consulter le catalogue.
+      security: []
+      x-rate-limit: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                password: { type: string, format: password, minLength: 12, maxLength: 128, writeOnly: true }
+                locale: { type: string, default: fr, maxLength: 16 }
+      responses:
+        '201':
+          description: Compte créé; vérification e-mail peut être requise avant activation de fonctions sensibles.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Ouvrir une session facultative
+      description: Les réponses d’identifiants invalides ne distinguent pas un compte absent d’un mot de passe incorrect. Les clients navigateur utilisent une session Sanctum et CSRF.
+      security: []
+      x-rate-limit: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, password]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                password: { type: string, format: password, minLength: 1, maxLength: 128, writeOnly: true }
+      responses:
+        '200':
+          description: Session établie.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Fermer la session courante
+      description: Révoque la session courante de façon idempotente. Une première demande de logout ne doit pas être refusée par la limite proposée.
+      security: [{ sanctum: [] }]
+      x-rate-limit: logout
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '204': { description: Session révoquée. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      operationId: requestPasswordReset
+      summary: Demander un lien de réinitialisation
+      description: Réponse générique pour éviter la découverte de comptes.
+      security: []
+      x-rate-limit: forgotPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+      responses:
+        '202': { description: Demande acceptée sans révéler si le compte existe. }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /auth/email/verification-notification:
+    post:
+      tags: [Auth]
+      operationId: resendEmailVerification
+      summary: Renvoyer le lien de vérification
+      security: [{ sanctum: [] }]
+      x-rate-limit: sendVerification
+      responses:
+        '202': { description: Notification mise en file; réponse neutre si non applicable. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /auth/email/verify/{userId}/{hash}:
+    get:
+      tags: [Auth]
+      operationId: verifyEmail
+      summary: Vérifier une adresse e-mail par lien signé à durée limitée
+      security: []
+      x-rate-limit: verifyEmail
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string, minLength: 32, maxLength: 128 }
+        - name: expires
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: signature
+          in: query
+          required: true
+          schema: { type: string, minLength: 32, maxLength: 256 }
+      responses:
+        '204': { description: Adresse vérifiée. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      operationId: resetPassword
+      summary: Réinitialiser le mot de passe
+      security: []
+      x-rate-limit: resetPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, token, password, password_confirmation]
+              properties:
+                email: { type: string, format: email, maxLength: 254 }
+                token: { type: string, minLength: 1, maxLength: 512, writeOnly: true }
+                password: { type: string, format: password, minLength: 12, maxLength: 128, writeOnly: true }
+                password_confirmation: { type: string, format: password, minLength: 12, maxLength: 128, writeOnly: true }
+      responses:
+        '204': { description: Mot de passe changé; sessions précédentes révoquées. }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me:
+    get:
+      tags: [Mon espace]
+      operationId: getCurrentUser
+      summary: Lire le compte courant
+      security: [{ sanctum: [] }]
+      x-rate-limit: profileRead
+      responses:
+        '200':
+          description: Compte connecté.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/CurrentUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Mon espace]
+      operationId: requestAccountDeletion
+      summary: Demander la suppression du compte
+      description: |
+        Requiert une ré-authentification récente, un jeton de confirmation à
+        usage unique et confirm=true. L’acceptation passe le compte à
+        deletion_pending, crée une demande traçable et révoque immédiatement
+        toutes les sessions Sanctum. La réponse remet un jeton limité au suivi;
+        il ne réactive pas le compte et ne permet aucune lecture de données.
+      security: [{ sanctum: [] }]
+      x-rate-limit: deleteAccount
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccountDeletionRequest' }
+      responses:
+        '202':
+          description: Demande enregistrée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [requestId, status, requestedAt, statusToken]
+                    properties:
+                      requestId: { type: string, format: uuid }
+                      status: { type: string, enum: [deletion_pending] }
+                      requestedAt: { type: string, format: date-time }
+                      statusToken: { type: string, minLength: 32, maxLength: 256, description: "Jeton de suivi rendu une seule fois; à envoyer dans X-Deletion-Status-Token, ne permet pas de lire le compte." }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /account-deletion-requests/{requestId}:
+    get:
+      tags: [Mon espace]
+      operationId: getAccountDeletionStatus
+      summary: Suivre une demande de suppression après révocation de session
+      description: Le jeton de suivi transmis lors de la demande est requis; la réponse ne contient que son état. Durée de validité du jeton à décider avant implémentation.
+      security: [{ deletionStatusToken: [] }]
+      x-rate-limit: deletionStatus
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: État minimal de la demande.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [status, requestedAt]
+                    properties:
+                      status: { type: string, enum: [deletion_pending, completed] }
+                      requestedAt: { type: string, format: date-time }
+                      completedAt: { type: [string, "null"], format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /auth/reauthenticate:
+    post:
+      tags: [Auth]
+      operationId: reauthenticate
+      summary: Confirmer récemment le mot de passe avant une action sensible
+      security: [{ sanctum: [] }]
+      x-rate-limit: reauthenticate
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [currentPassword]
+              properties:
+                currentPassword: { type: string, minLength: 1, maxLength: 128, writeOnly: true }
+      responses:
+        '200':
+          description: Grant à usage unique et durée courte; durée exacte à configurer avant déploiement.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReauthenticationGrant' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/profile:
+    get:
+      tags: [Mon espace]
+      operationId: getProfile
+      summary: Lire mon profil et mes préférences
+      x-rate-limit: profileRead
+      security: [{ sanctum: [] }]
+      responses:
+        '200':
+          description: Profil privé.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Profile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [Mon espace]
+      operationId: updateProfile
+      summary: Modifier mes préférences
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileUpdate' }
+      responses:
+        '200':
+          description: Profil modifié.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Profile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /domains:
+    get:
+      tags: [Catalogue]
+      operationId: listDomains
+      summary: Parcourir les domaines publiés
+      x-rate-limit: domainList
+      description: N’inclut aucun domaine en préparation, brouillon ou retiré. Pagination cursor; les recommandations ne changent pas le statut éditorial.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: family
+          in: query
+          schema: { type: string, maxLength: 80 }
+        - name: q
+          in: query
+          description: Recherche textuelle simple dans le nom et le résumé publiés.
+          schema: { type: string, maxLength: 120 }
+      responses:
+        '200':
+          description: Page de domaines publiés.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Domain' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /domains/{domainId}:
+    get:
+      tags: [Catalogue]
+      operationId: getDomain
+      summary: Lire un domaine publié
+      x-rate-limit: domainRead
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/DomainId'
+      responses:
+        '200':
+          description: Domaine et parcours publiés.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/DomainDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /pathways/{pathwayId}:
+    get:
+      tags: [Catalogue]
+      operationId: getPathway
+      summary: Lire un parcours publié et sa structure
+      x-rate-limit: pathwayRead
+      description: Les réponses contiennent uniquement la formulation et les options visibles; jamais la clé de correction.
+      security: []
+      parameters:
+        - name: pathwayId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Parcours publié versionné.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Pathway' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /search:
+    get:
+      tags: [Catalogue]
+      operationId: searchCatalog
+      summary: Rechercher dans le catalogue publié
+      description: Recherche serveur paginée; les résultats sont filtrés avant classement pour exclure les brouillons et domaines en préparation.
+      security: []
+      x-rate-limit: catalogSearch
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 2, maxLength: 120 }
+        - name: family
+          in: query
+          schema: { type: string, maxLength: 80 }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Résultats publiés.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/SearchResult' }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /recommendations:
+    get:
+      tags: [Catalogue]
+      operationId: getRecommendations
+      summary: Obtenir des recommandations facultatives
+      description: Sans authentification, accepte des critères minimisés et non persistés; avec compte, peut utiliser les intérêts uniquement après consentement. Les recommandations ne sont ni décisions d’admission ni garanties de débouché.
+      security: []
+      x-rate-limit: recommendations
+      parameters:
+        - name: interest
+          in: query
+          schema: { type: array, maxItems: 8, items: { type: string, maxLength: 80 } }
+        - name: goal
+          in: query
+          schema: { type: string, enum: [explore, learn_skill, make_project, discover_careers] }
+        - name: level
+          in: query
+          schema: { type: string, enum: [beginner, tried, practicing] }
+        - name: time
+          in: query
+          schema: { type: string, enum: [flexible, minutes_daily, hours_weekly] }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Suggestions basées uniquement sur le catalogue publié.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Recommendation' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /quizzes/{quizId}:
+    get:
+      tags: [Quiz]
+      operationId: getQuiz
+      summary: Lire un quiz publié sans corrigé
+      x-rate-limit: quizRead
+      description: Ne retourne jamais la bonne option, un index correct, un booléen isCorrect, ni les points par réponse.
+      security: []
+      parameters:
+        - name: quizId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Quiz à choix unique publié.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/PublicQuiz' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /quizzes/{quizId}/sessions:
+    post:
+      tags: [Quiz]
+      operationId: createGuestQuizSession
+      summary: Ouvrir une session de quiz invitée (désactivé)
+      description: |
+        Fonction désactivée jusqu’à décision de rétention. Retourne 503
+        FEATURE_DISABLED avant validation du quiz ou du corps; aucun jeton,
+        session volatile ou état durable n’est créé.
+      security: []
+      x-disabled-feature: guest_quiz_session
+      parameters:
+        - name: quizId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '503': { $ref: '#/components/responses/FeatureDisabled' }
+        default: { $ref: '#/components/responses/Problem' }
+  /quizzes/{quizId}/attempts:
+    post:
+      tags: [Quiz]
+      operationId: submitQuizAttempt
+      summary: Soumettre des réponses au serveur (désactivé)
+      description: |
+        La soumission/correction serveur et toute persistance d’essai sont
+        désactivées jusqu’à approbation d’une rétention. Retourne 503
+        FEATURE_DISABLED avant validation ou correction; les réponses et
+        résultats ne sont ni stockés, ni journalisés, ni ajoutés aux analytics.
+        Les quiz locaux restent utilisables sur l’appareil; ils ne créent pas
+        de tentative serveur.
+      security:
+        - sanctum: []
+        - quizGuest: []
+      x-disabled-feature: quiz_attempt_persistence
+      parameters:
+        - name: quizId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/FeatureDisabled' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/progress:
+    get:
+      tags: [Mon espace]
+      operationId: getMyProgress
+      summary: Lire ma progression synchronisée
+      x-rate-limit: profileRead
+      security: [{ sanctum: [] }]
+      responses:
+        '200':
+          description: Progression du compte courant.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/LearnerProgress' }
+          headers:
+            ETag:
+              description: Validateur opaque de la représentation courante; à renvoyer dans If-Match lors du PUT.
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [Mon espace]
+      operationId: replaceMyProgress
+      summary: Enregistrer ma progression explicite
+      description: Remplacement conditionnel par ETag/If-Match; les opérations incrémentales conseillées ci-dessous évitent les mises à jour perdues. Ce PUT ne peut pas effacer silencieusement des données en omettant des champs.
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProgressUpdate' }
+      responses:
+        '200':
+          description: Progression enregistrée.
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/LearnerProgress' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/lesson-progress:
+    put:
+      tags: [Mon espace]
+      operationId: markLessonProgress
+      summary: Enregistrer l’état d’une leçon
+      description: PUT de remplacement/upsert naturellement idempotent; aucune clé Idempotency-Key n’est utilisée ni exigée.
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [lessonId, status]
+              properties:
+                lessonId: { type: string, format: uuid }
+                status: { type: string, enum: [in_progress, completed] }
+      responses:
+        '200':
+          description: Progression de leçon enregistrée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/LessonProgress' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/project-progress/{projectId}:
+    put:
+      tags: [Mon espace, Portfolio]
+      operationId: updateProjectProgress
+      summary: Enregistrer ma checklist et mon état de projet
+      description: PUT de remplacement/upsert naturellement idempotent; aucune clé Idempotency-Key n’est utilisée ni exigée. La progression de projet est auto-déclarée et distincte d’une note, d’un portfolio ou d’une certification.
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status, checkedItemIds]
+              properties:
+                status: { type: string, enum: [not_started, in_progress, completed] }
+                checkedItemIds: { type: array, maxItems: 50, uniqueItems: true, items: { type: string, maxLength: 120 } }
+                url: { type: [string, "null"], format: uri, maxLength: 500, description: HTTPS seulement si renseigné. }
+      responses:
+        '200':
+          description: Progression de projet enregistrée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ProjectProgress' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/quiz-attempts:
+    get:
+      tags: [Quiz, Mon espace]
+      operationId: listMyQuizAttempts
+      summary: Historique des tentatives (désactivé)
+      description: |
+        L’historique authentifié est désactivé jusqu’à approbation d’une
+        rétention. Retourne 503 FEATURE_DISABLED; aucune tentative n’est lue,
+        créée ni conservée pour la page de révision.
+      security: [{ sanctum: [] }]
+      x-disabled-feature: quiz_attempt_history
+      responses:
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/FeatureDisabled' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/notes:
+    get:
+      tags: [Mon espace]
+      operationId: listMyNotes
+      summary: Lister mes notes
+      x-rate-limit: profileRead
+      security: [{ sanctum: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Notes privées paginées.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/LearnerNote' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Mon espace]
+      operationId: createOrUpdateNote
+      summary: Créer ou mettre à jour une note privée
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [lessonId, body]
+              properties:
+                lessonId: { type: string, format: uuid }
+                body: { type: string, maxLength: 10000 }
+      responses:
+        '200':
+          description: Note mise à jour.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/LearnerNote' }
+        '201':
+          description: Note créée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/LearnerNote' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/notes/{noteId}:
+    delete:
+      tags: [Mon espace]
+      operationId: deleteNote
+      summary: Supprimer ma note
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      parameters:
+        - name: noteId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Note supprimée. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/saved-resources:
+    get:
+      tags: [Mon espace]
+      operationId: listSavedResources
+      summary: Lister ma bibliothèque
+      x-rate-limit: profileRead
+      security: [{ sanctum: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Ressources enregistrées.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/SavedResource' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Mon espace]
+      operationId: saveResource
+      summary: Enregistrer une ressource dans ma bibliothèque
+      description: Accepter seulement une URL HTTPS sans identifiants URL. Parser puis normaliser l’URL; si l’hôte est une IP littérale, vérifier directement qu’elle est publiquement routable; pour un nom d’hôte, résoudre tous les résultats DNS A et AAAA et rejeter si la réponse est vide/invalide ou si un seul résultat n’est pas publiquement routable (notamment privé, réservé, loopback, link-local ou metadata). Ne faire aucun appel HTTP ni scraping lors de la validation. Ne persister ni secrets, ni résultats DNS, ni données d’hôte dérivées au-delà de l’URL normalisée; revalider la résolution au moment de toute utilisation future côté serveur.
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [url, title]
+              properties:
+                url: { type: string, format: uri, maxLength: 1000, description: HTTPS seulement; aucune information d’authentification dans l’URL. }
+                title: { type: string, minLength: 1, maxLength: 180 }
+                source: { type: string, maxLength: 100 }
+                resourceId: { type: [string, "null"], format: uuid }
+      responses:
+        '201':
+          description: Ressource enregistrée (HTTPS uniquement).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/SavedResource' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/saved-resources/{resourceId}:
+    delete:
+      tags: [Mon espace]
+      operationId: unsaveResource
+      summary: Retirer une ressource de ma bibliothèque
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      parameters:
+        - name: resourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Ressource retirée. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/weekly-goal:
+    get:
+      tags: [Mon espace]
+      operationId: getWeeklyGoal
+      summary: Lire mon objectif hebdomadaire
+      x-rate-limit: profileRead
+      security: [{ sanctum: [] }]
+      responses:
+        '200':
+          description: Objectif hebdomadaire du compte courant. Les jours actifs sont fournis séparément par la ressource de progression.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/WeeklyGoal' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [Mon espace]
+      operationId: updateWeeklyGoal
+      summary: Modifier mon objectif
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [targetDays]
+              properties:
+                targetDays: { type: integer, enum: [2, 3, 5, 7] }
+      responses:
+        '200':
+          description: Objectif enregistré.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/WeeklyGoal' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/imports/guest-state:
+    post:
+      tags: [Mon espace]
+      operationId: importGuestState
+      summary: Importer de façon idempotente une progression invitée
+      description: |
+        Authentification requise, mais le compte reste facultatif pour le reste
+        de l’application. N’écrase jamais un état serveur par une absence ou une
+        valeur plus ancienne. La requête est limitée aux variantes strictement
+        fermées GuestImportV2Request et GuestImportLegacyRequest. Une même
+        Idempotency-Key avec le même checksum renvoie le rapport initial; la
+        même clé avec un payload différent répond 409. Les sources locales ne
+        sont jamais supprimées. Plafond en octets à décider avant implémentation;
+        les limites de tableaux de schéma ne valent pas plafond total. Si
+        Content-Type n'est pas application/json (paramètres charset permis),
+        répondre 415 avant toute lecture ou validation du corps, traitement de
+        Idempotency-Key, limite de débit, traitement de lot ou mutation. Le 503
+        FEATURE_DISABLED (feature=imported_quiz_results) ne s'applique qu'après
+        acceptation du Content-Type et validation d'un corps JSON valide : si
+        state.quizResults contient au moins un résultat, rejeter atomiquement
+        toute la requête avant idempotence, limite de débit, écriture de lot ou
+        toute fusion; ne pas importer le reste partiellement.
+        La détection se fait en mémoire seulement; le corps n’est ni conservé
+        dans des logs, cache, outbox ou analytics.
+        Le client peut recommencer après confirmation avec quizResults omis.
+      security: [{ sanctum: [] }]
+      x-rate-limit: guestImport
+      x-disabled-feature: imported_quiz_results
+      x-disabled-condition: state.quizResults has at least one entry
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GuestImportRequest' }
+      responses:
+        '200':
+          description: Rejeu idempotent d’un import déjà appliqué.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/GuestImportReport' }
+        '201':
+          description: Import appliqué ou partiellement appliqué, sans suppression source.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/GuestImportReport' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        '503': { $ref: '#/components/responses/FeatureDisabled' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/portfolio:
+    get:
+      tags: [Portfolio]
+      operationId: listPortfolio
+      summary: Lister mon portfolio privé
+      x-rate-limit: profileRead
+      security: [{ sanctum: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Fiches privées paginées.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/PortfolioItem' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Portfolio]
+      operationId: createPortfolioItem
+      summary: Créer une fiche privée de portfolio
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PortfolioItemWrite' }
+      responses:
+        '201':
+          description: Fiche créée; visibilité privée uniquement.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/PortfolioItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/portfolio/{itemId}:
+    patch:
+      tags: [Portfolio]
+      operationId: updatePortfolioItem
+      summary: Modifier une fiche privée
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PortfolioItemPatch' }
+      responses:
+        '200':
+          description: Fiche modifiée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/PortfolioItem' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Portfolio]
+      operationId: deletePortfolioItem
+      summary: Supprimer une fiche et ses fichiers
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Fiche supprimée; purge des fichiers déclenchée. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/portfolio/{itemId}/attachments:
+    post:
+      tags: [Portfolio]
+      operationId: uploadPortfolioAttachment
+      summary: Ajouter un fichier privé à une fiche
+      description: PDF maximum 5 Mio ou image PNG/JPEG/WebP maximum 2 Mio; au plus un fichier de chaque type par fiche. Vérification du contenu MIME côté serveur et stockage privé.
+      x-rate-limit: portfolioUpload
+      security: [{ sanctum: [] }]
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                sha256: { type: string, pattern: '^[a-fA-F0-9]{64}$' }
+      responses:
+        '201':
+          description: Fichier validé et conservé en privé.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/PortfolioAttachment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/portfolio/{itemId}/attachments/{attachmentId}/content:
+    get:
+      tags: [Portfolio]
+      operationId: downloadPortfolioAttachmentContent
+      summary: Télécharger le contenu privé d’une pièce jointe
+      description: >-
+        Exige la session cookie Sanctum first-party. Le GET ne requiert pas de
+        vérification CSRF. Le client construit ce chemin avec les IDs de la fiche
+        et de la pièce jointe, et demande avec credentials: include (ou navigation
+        first-party). Sur tout fetch cross-origin autorisé, CORS n’accepte que
+        l’origine first-party configurée, avec credentials; Content-Disposition
+        est exposé au navigateur. Le serveur vérifie l’appartenance de la fiche
+        au compte et le rattachement de la pièce jointe à cette fiche avant de
+        streamer depuis le stockage privé. Aucun redirect vers un stockage public,
+        aucune URL signée/tokenisée ni URL de stockage en clair n’est retournée
+        ou connue des logs applicatifs. Le Content-Type de la réponse binaire
+        correspond au mediaType vérifié de la pièce jointe.
+      x-rate-limit: profileRead
+      security: [{ sanctum: [] }]
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Contenu binaire streamé après autorisation; le Content-Type correspond au mediaType vérifié, sans ETag requis.
+          headers:
+            Content-Disposition:
+              description: >-
+                attachment avec filename sécurisé, neutralisé pour l’en-tête;
+                aucune valeur fournie par le client n’est utilisée comme chemin.
+              schema: { type: string }
+            Cache-Control:
+              description: Interdit la mise en cache partagée ou persistante.
+              schema: { type: string, const: 'private, no-store' }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/png:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/portfolio/{itemId}/attachments/{attachmentId}:
+    delete:
+      tags: [Portfolio]
+      operationId: deletePortfolioAttachment
+      summary: Supprimer une pièce jointe
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Accès révoqué immédiatement; purge du blob privé durablement mise en file et réessayée jusqu’à suppression. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /me/reminder-preferences:
+    get:
+      tags: [Rappels]
+      operationId: getReminderPreferences
+      summary: Lire mes préférences de rappel
+      x-rate-limit: profileRead
+      security: [{ sanctum: [] }]
+      responses:
+        '200':
+          description: Préférences (désactivées par défaut).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ReminderPreferences' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    put:
+      tags: [Rappels]
+      operationId: updateReminderPreferences
+      summary: Activer ou modifier des rappels e-mail
+      description: Activation explicite et e-mail vérifié obligatoires; désactivation immédiate possible. Au plus un rappel par semaine.
+      x-rate-limit: accountWrite
+      security: [{ sanctum: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+                frequency: { type: string, enum: [weekly], default: weekly }
+                timezone: { type: string, maxLength: 64 }
+                preferredWeekday: { type: integer, minimum: 0, maximum: 6 }
+                consent: { type: boolean, description: Doit être true à l’activation initiale. }
+      responses:
+        '200':
+          description: Préférences enregistrées.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ReminderPreferences' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /reminders/unsubscribe:
+    post:
+      tags: [Rappels]
+      operationId: unsubscribeEmailReminder
+      summary: Se désinscrire d’un rappel depuis un lien d’e-mail
+      description: Jeton signé à usage limité, ne nécessite pas de connexion et ne désactive que les rappels Librescence. L’opération est idempotente.
+      security: []
+      x-rate-limit: reminderUnsubscribe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token: { type: string, minLength: 32, maxLength: 512, writeOnly: true }
+      responses:
+        '204': { description: Rappels désactivés ou déjà désactivés. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /contacts:
+    post:
+      tags: [Contact]
+      operationId: createContactMessage
+      summary: Envoyer une demande de contact (désactivé)
+      description: |
+        Le stockage de contacts est désactivé jusqu’à approbation d’une
+        politique de rétention. Retourne 503 FEATURE_DISABLED avant validation
+        ou traitement du corps; aucun message, coordonnées, consentement,
+        identifiant d’idempotence ou copie d’audit n’est accepté ou conservé.
+        Le message WhatsApp local reste distinct et n’est pas envoyé par cette API.
+      security: []
+      x-disabled-feature: contact_storage
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '503': { $ref: '#/components/responses/FeatureDisabled' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/domains:
+    get:
+      tags: [Administration]
+      operationId: adminListDomains
+      summary: Lister les domaines éditoriaux
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Domaines, y compris les brouillons et contenus en préparation.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AdminDomain' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Administration]
+      operationId: adminCreateDomain
+      summary: Créer un domaine en brouillon
+      description: Rôle éditeur; une création ne publie jamais automatiquement un domaine.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminDomainWrite' }
+      responses:
+        '201':
+          description: Brouillon créé.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminDomain' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/family-pathway-templates:
+    get:
+      tags: [Administration]
+      operationId: adminListFamilyPathwayTemplates
+      summary: Lister les gabarits familiaux versionnés
+      description: |
+        Inclut les versions draft/in_review et leurs quatre semaines modèles,
+        skills, exemples de careers, projets, questions source, options, clés
+        privées et thèmes par domaine. N'est pas une route de catalogue public.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      x-rate-limit: adminRead
+      parameters:
+        - name: familyId
+          in: query
+          schema: { type: string, maxLength: 80 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, in_review, approved, published, archived] }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Gabarits éditoriaux paginés, corrigés privés inclus.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AdminFamilyPathwayTemplate' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Administration]
+      operationId: adminCreateFamilyPathwayTemplate
+      summary: Créer une version brouillon de gabarit familial
+      description: |
+        Valide quatre positions de semaines uniques, trois étapes ordonnées par
+        semaine, des stableKeys uniques, le lien entre sourceQuestionAnswerIndex
+        et correctOptionStableKey, et des sourceIds existants. Toute violation
+        est 422 et aucune ligne partielle n'est créée.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      x-rate-limit: adminWrite
+      parameters:
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminFamilyPathwayTemplateWrite' }
+      responses:
+        '201':
+          description: Version créée en draft; aucune publication implicite.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminFamilyPathwayTemplate' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/family-pathway-templates/{templateId}:
+    get:
+      tags: [Administration]
+      operationId: adminGetFamilyPathwayTemplate
+      summary: Lire un gabarit familial complet
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      x-rate-limit: adminRead
+      parameters:
+        - name: templateId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Version du gabarit avec contenu source et overrides structurés.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminFamilyPathwayTemplate' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [Administration]
+      operationId: adminUpdateFamilyPathwayTemplate
+      summary: Modifier partiellement un gabarit non publié
+      description: Une version publiée est immuable; une modification publiée crée une nouvelle version.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      x-rate-limit: adminWrite
+      parameters:
+        - name: templateId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminFamilyPathwayTemplatePatch' }
+      responses:
+        '200':
+          description: Brouillon modifié.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminFamilyPathwayTemplate' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Administration]
+      operationId: adminArchiveFamilyPathwayTemplate
+      summary: Archiver un gabarit sans supprimer ses voies générées
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      x-rate-limit: adminWrite
+      parameters:
+        - name: templateId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Gabarit archivé; ses pathways et provenance restent conservés. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/family-pathway-templates/{templateId}/publish:
+    post:
+      tags: [Administration]
+      operationId: publishFamilyPathwayTemplate
+      summary: Approuver et publier une version de gabarit
+      description: |
+        Action éditoriale explicite. Vérifie source, cardinalités, options et
+        correction privée; toutes les sources attachées doivent être approuvées,
+        porter reviewer/date et avoir un audit source; les IDs audités sont liés
+        à l’événement de publication. Ne publie ni les pathways
+        matérialisés ni aucun domaine.
+      security: [{ sanctum: [] }]
+      x-required-role: content_approver
+      x-rate-limit: adminWrite
+      parameters:
+        - name: templateId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Gabarit publié; voies générées inchangées jusqu'à une matérialisation distincte et revue.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminFamilyPathwayTemplate' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/domains/{domainId}:
+    get:
+      tags: [Administration]
+      operationId: adminGetDomain
+      summary: Lire un domaine éditorial
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - $ref: '#/components/parameters/DomainId'
+      responses:
+        '200':
+          description: Domaine avec statut éditorial et liens stables.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminDomain' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [Administration]
+      operationId: adminUpdateDomain
+      summary: Modifier un domaine non publié ou préparer une nouvelle révision
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - $ref: '#/components/parameters/DomainId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminDomainPatch' }
+      responses:
+        '200':
+          description: Domaine modifié; une version publiée est immuable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminDomain' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Administration]
+      operationId: adminArchiveDomain
+      summary: Archiver un domaine
+      description: Suppression logique; un domaine référencé ou publié est archivé et son identifiant stable ne peut pas être réutilisé.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - $ref: '#/components/parameters/DomainId'
+      responses:
+        '204': { description: Domaine archivé. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/domains/{domainId}/publish:
+    post:
+      tags: [Administration]
+      operationId: publishDomain
+      summary: Publier un domaine après revue
+      description: |
+        Rôle approbateur requis; vérifie famille, provenance et qu’au moins
+        un parcours complet est publié. Toutes les sources du domaine et de
+        ses pathways doivent être approuvées, reviewer/date renseignés et IDs
+        liés à leurs audits avant que le domaine devienne public.
+      security: [{ sanctum: [] }]
+      x-required-role: content_approver
+      x-rate-limit: adminWrite
+      parameters:
+        - $ref: '#/components/parameters/DomainId'
+      responses:
+        '200':
+          description: Domaine publié.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminDomain' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/pathways:
+    get:
+      tags: [Administration]
+      operationId: adminListPathways
+      summary: Lister les parcours éditoriaux
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: domainId
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, in_review, published, archived] }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Versions de parcours paginées.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AdminPathway' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Administration]
+      operationId: adminCreatePathway
+      summary: Créer une nouvelle version de parcours en brouillon
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminPathwayWrite' }
+      responses:
+        '201':
+          description: Brouillon créé et validable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminPathway' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/pathways/{pathwayId}:
+    get:
+      tags: [Administration]
+      operationId: adminGetPathway
+      summary: Lire une version de parcours éditoriale
+      description: La structure d’un parcours se lit via les collections de semaines et séances; les identifiants référencés sont retournés explicitement.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: pathwayId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Métadonnées du parcours.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminPathway' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [Administration]
+      operationId: adminUpdatePathway
+      summary: Modifier un brouillon de parcours
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: pathwayId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminPathwayPatch' }
+      responses:
+        '200':
+          description: Brouillon modifié.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminPathway' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Administration]
+      operationId: adminArchivePathway
+      summary: Archiver une version de parcours
+      description: Suppression logique; versions référencées par progression restent consultables en audit. Les tentatives ne sont pas stockées par les routes actuellement désactivées.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: pathwayId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Parcours archivé. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/pathways/{pathwayId}/weeks:
+    get:
+      tags: [Administration]
+      operationId: adminListWeeks
+      summary: Lister les semaines d’un parcours
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: pathwayId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Semaines ordonnées avec leurs identifiants stables.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AdminWeek' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Administration]
+      operationId: adminCreateWeek
+      summary: Créer une semaine dans un parcours brouillon
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: pathwayId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminWeekWrite' }
+      responses:
+        '201':
+          description: Semaine créée; stableKey unique dans le parcours.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminWeek' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/weeks/{weekId}:
+    get:
+      tags: [Administration]
+      operationId: adminGetWeek
+      summary: Lire une semaine
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: weekId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Semaine et parcours parent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminWeek' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [Administration]
+      operationId: adminUpdateWeek
+      summary: Modifier partiellement une semaine brouillon
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: weekId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminWeekPatch' }
+      responses:
+        '200':
+          description: Semaine modifiée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminWeek' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Administration]
+      operationId: adminArchiveWeek
+      summary: Archiver une semaine
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: weekId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Semaine archivée si aucune référence historique ne l’interdit. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/weeks/{weekId}/lessons:
+    get:
+      tags: [Administration]
+      operationId: adminListLessons
+      summary: Lister les séances d’une semaine
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: weekId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Séances ordonnées avec les IDs de ressources et quiz liés.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AdminLesson' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Administration]
+      operationId: adminCreateLesson
+      summary: Créer une séance dans une semaine brouillon
+      description: Les références quizIds et resourceIds doivent exister; elles peuvent être ajoutées ultérieurement par PATCH après création des objets référencés.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: weekId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminLessonWrite' }
+      responses:
+        '201':
+          description: Séance créée avec stableKey unique dans la semaine.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminLesson' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/lessons/{lessonId}:
+    get:
+      tags: [Administration]
+      operationId: adminGetLesson
+      summary: Lire une séance et ses liaisons
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: lessonId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Séance, IDs stables, quiz et ressources associés.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminLesson' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [Administration]
+      operationId: adminUpdateLesson
+      summary: Modifier partiellement une séance brouillon
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: lessonId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminLessonPatch' }
+      responses:
+        '200':
+          description: Séance modifiée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminLesson' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Administration]
+      operationId: adminArchiveLesson
+      summary: Archiver une séance
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: lessonId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Séance archivée si les progressions la permettent; aucune tentative persistante n’est active. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/resources:
+    get:
+      tags: [Administration]
+      operationId: adminListResources
+      summary: Lister les ressources éditoriales
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: lessonId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: domainId
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Ressources et leurs liaisons éditoriales.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AdminResource' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Administration]
+      operationId: adminCreateResource
+      summary: Créer une ressource en brouillon
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminResourceWrite' }
+      responses:
+        '201':
+          description: Ressource créée avec status=draft; elle n’est pas publique avant publication explicite et publication du parent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminResource' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/resources/{resourceId}:
+    get:
+      tags: [Administration]
+      operationId: adminGetResource
+      summary: Lire une ressource éditoriale et ses liaisons
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: resourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Ressource et références de provenance/parent.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminResource' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [Administration]
+      operationId: adminUpdateResource
+      summary: Modifier une ressource éditoriale
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: resourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminResourcePatch' }
+      responses:
+        '200':
+          description: Ressource modifiée; changement d’une version publiée via nouvelle révision.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminResource' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Administration]
+      operationId: adminArchiveResource
+      summary: Archiver une ressource éditoriale
+      description: Les références historiques sont conservées; l’archivage la retire des réponses publiques.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: resourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Ressource archivée. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/resources/{resourceId}/publish:
+    post:
+      tags: [Administration]
+      operationId: publishResource
+      summary: Publier une ressource après vérification
+      description: |
+        Rôle approbateur requis. Échoue avant mutation si la source liée n’est
+        pas `approved`, si `reviewedBy`/`reviewedAt` manquent, si la revue source
+        n’a pas son audit ID, ou si URL, parent et état de vérification échouent.
+        L’événement de publication lie l’ID de source exact; un lien générique
+        n’est pas transformé en cours vérifié.
+      security: [{ sanctum: [] }]
+      x-required-role: content_approver
+      x-rate-limit: adminWrite
+      parameters:
+        - name: resourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Ressource publiée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminResource' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/pathways/{pathwayId}/publish:
+    post:
+      tags: [Administration]
+      operationId: publishPathway
+      summary: Valider et publier une version de parcours
+      description: |
+        Requiert rôle approbateur; exécute les contrôles de complétude, unicité
+        des IDs et absence de correction dans les réponses publiques. `reviewedSourceIds`
+        doit être exactement la fermeture des sources attachées au pathway et à
+        ses semaines, séances, quiz/questions, projets et ressources incluses.
+        Chaque source doit exister, être `approved`, avoir reviewer/date et
+        événement de revue audité. Toute différence, source rejetée/non revue ou
+        audit manquant entraîne 409/422 sans mutation. L’événement de publication
+        enregistre les IDs exacts. Quiz attempts/contact/certificats restent différés.
+      security: [{ sanctum: [] }]
+      x-required-role: content_approver
+      parameters:
+        - name: pathwayId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedVersion, reviewedSourceIds]
+              properties:
+                expectedVersion: { type: integer, minimum: 1 }
+                reviewedSourceIds:
+                  type: array
+                  minItems: 1
+                  uniqueItems: true
+                  items: { type: string, format: uuid, description: "IDs exacts de toutes les sources de la fermeture éditoriale, sans omission ni ajout." }
+      responses:
+        '200':
+          description: Version publiée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminPathway' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/quizzes:
+    get:
+      tags: [Administration, Quiz]
+      operationId: adminListQuizzes
+      summary: Lister les quiz éditoriaux
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: lessonId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Quiz du parent, y compris les brouillons.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AdminQuiz' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Administration, Quiz]
+      operationId: adminCreateQuiz
+      summary: Créer un quiz en brouillon avec son corrigé privé
+      description: Seul le service éditorial reçoit les clés de correction. La réponse de cette route ne peut pas être utilisée par les routes publiques du catalogue.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminQuizWrite' }
+      responses:
+        '201':
+          description: Quiz brouillon créé.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminQuiz' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/quizzes/{quizId}:
+    get:
+      tags: [Administration, Quiz]
+      operationId: adminGetQuiz
+      summary: Lire un quiz éditorial et son corrigé privé
+      description: Accessible aux éditeurs; jamais réutiliser cette représentation dans une réponse publique.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: quizId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Quiz avec questions/options et clés réservées à l’édition.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminQuiz' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [Administration, Quiz]
+      operationId: adminUpdateQuiz
+      summary: Modifier un brouillon de quiz
+      description: Les tentatives ne sont pas stockées actuellement. Si leur persistance est ultérieurement activée après décision produit, une version publiée référencée par des tentatives sera immuable.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: quizId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminQuizPatch' }
+      responses:
+        '200':
+          description: Quiz brouillon modifié avec clé privée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminQuiz' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Administration, Quiz]
+      operationId: adminArchiveQuiz
+      summary: Archiver un quiz
+      description: Aucune tentative persistante n’est active; les règles de conservation des versions liées aux tentatives ne s’appliqueront qu’après réactivation approuvée.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: quizId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Quiz archivé. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/quizzes/{quizId}/questions:
+    get:
+      tags: [Administration, Quiz]
+      operationId: adminListQuestions
+      summary: Lister les questions d’un quiz
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: quizId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Questions ordonnées avec options et indicateur de correction, rôle éditeur seulement.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AdminQuestion' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    post:
+      tags: [Administration, Quiz]
+      operationId: adminCreateQuestion
+      summary: Créer une question et ses options en brouillon
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: quizId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminQuestionWrite' }
+      responses:
+        '201':
+          description: Question et options créées; stableKey unique dans le quiz.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminQuestion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/questions/{questionId}:
+    get:
+      tags: [Administration, Quiz]
+      operationId: adminGetQuestion
+      summary: Lire une question éditoriale
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: questionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Question et options éditoriales.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminQuestion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        default: { $ref: '#/components/responses/Problem' }
+    patch:
+      tags: [Administration, Quiz]
+      operationId: adminUpdateQuestion
+      summary: Modifier partiellement une question brouillon
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: questionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminQuestionPatch' }
+      responses:
+        '200':
+          description: Question modifiée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminQuestion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+    delete:
+      tags: [Administration, Quiz]
+      operationId: adminArchiveQuestion
+      summary: Archiver une question
+      description: Aucune tentative historique n’est stockée par l’API actuelle; l’archivage n’entraîne donc pas de conservation de réponses quiz.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      parameters:
+        - name: questionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Question archivée. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/quizzes/{quizId}/publish:
+    post:
+      tags: [Administration, Quiz]
+      operationId: publishQuiz
+      summary: Valider et publier un quiz
+      description: Vérifie questions/options/explications, sources toutes approuvées avec reviewer/date et audit, et rattachement au cours parent. Une source non revue échoue sans publication.
+      security: [{ sanctum: [] }]
+      x-required-role: content_approver
+      parameters:
+        - name: quizId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Quiz publié. La représentation publique reste distincte et ne contient pas la clé.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/AdminQuiz' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/content-sources:
+    post:
+      tags: [Administration]
+      operationId: adminRegisterContentSource
+      summary: Enregistrer la provenance d’un contenu
+      description: |
+        Enregistre une source en `unknown` ou `review_required` uniquement.
+        `content_editor` ne peut pas créer ou auto-approuver une source :
+        `approved` et `rejected` sont refusés ici. La revue est une transition
+        séparée réservée à `content_approver`.
+      security: [{ sanctum: [] }]
+      x-required-role: content_editor
+      x-rate-limit: adminWrite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContentSourceWrite' }
+      responses:
+        '201':
+          description: Source éditoriale enregistrée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ContentSource' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/content-sources/{sourceId}/review:
+    post:
+      tags: [Administration]
+      operationId: reviewContentSource
+      summary: Approuver ou rejeter les droits d’une source
+      description: |
+        Transition distincte et réservée à `content_approver`. Le serveur
+        dérive `reviewedBy` de l’utilisateur Sanctum et génère `reviewedAt`;
+        le client ne peut pas choisir ces valeurs. Le reviewer Sanctum doit
+        être distinct de l’auteur de la révision (`revisionAuthorId`), même si
+        les rôles se cumulent; sinon la requête échoue avec `409` sans changer
+        le statut ni écrire d’audit. Écrit la décision et
+        `content_audit_events` atomiquement. `approved` atteste les droits de
+        cette source uniquement et ne publie aucun domaine, pathway, quiz ou
+        ressource. Les sources rejetées restent traçables, mais ne peuvent pas
+        satisfaire une publication.
+      security: [{ sanctum: [] }]
+      x-required-role: content_approver
+      x-rate-limit: adminWrite
+      parameters:
+        - name: sourceId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/CsrfToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContentSourceReviewRequest' }
+      responses:
+        '200':
+          description: Décision enregistrée; reviewer et date sont générés côté serveur.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/ContentSource' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimitError' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/contacts:
+    get:
+      tags: [Administration, Contact]
+      operationId: adminListContacts
+      summary: Historique des contacts (désactivé)
+      description: Aucun stockage de contact n’est actif; même le rôle support_contact reçoit 503 FEATURE_DISABLED. Aucune file n’est lue et aucune donnée personnelle n’est retournée.
+      security: [{ sanctum: [] }]
+      x-required-role: support_contact
+      x-disabled-feature: contact_storage
+      responses:
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/FeatureDisabled' }
+        default: { $ref: '#/components/responses/Problem' }
+  /admin/contacts/{contactId}:
+    patch:
+      tags: [Administration, Contact]
+      operationId: adminUpdateContact
+      summary: Modifier un contact (désactivé)
+      description: Aucune ligne de contact n’est active; retourne 503 FEATURE_DISABLED sans rechercher ni modifier une demande.
+      security: [{ sanctum: [] }]
+      x-required-role: support_contact
+      x-disabled-feature: contact_storage
+      parameters:
+        - name: contactId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/CsrfToken'
+      responses:
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/FeatureDisabled' }
+        default: { $ref: '#/components/responses/Problem' }
+components:
+  securitySchemes:
+    sanctum:
+      type: apiKey
+      in: cookie
+      name: laravel_session
+      description: |
+        Cookie de session Sanctum HttpOnly du client first-party. Aucun bearer
+        token n’est exposé au navigateur ni décrit comme mécanisme de cette API.
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-XSRF-TOKEN
+      description: Valeur décodée du cookie XSRF-TOKEN, obligatoire pour les mutations navigateur.
+    quizGuest:
+      type: apiKey
+      in: header
+      name: X-Quiz-Session
+      description: Schéma réservé à une éventuelle réactivation; aucune session ni aucun jeton quiz n’est actuellement émis.
+    deletionStatusToken:
+      type: apiKey
+      in: header
+      name: X-Deletion-Status-Token
+      description: Jeton limité à la lecture de l’état de la demande de suppression correspondante.
+  parameters:
+    DomainId:
+      name: domainId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+    Cursor:
+      name: cursor
+      in: query
+      description: Curseur opaque retourné par la page précédente.
+      schema: { type: string, maxLength: 512 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' }
+    CsrfToken:
+      name: X-XSRF-TOKEN
+      in: header
+      required: true
+      description: Valeur décodée du cookie XSRF-TOKEN après GET /auth/csrf-cookie.
+      schema: { type: string, minLength: 16, maxLength: 512 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: ETag de la version lue; rejet 412 si la ressource a changé.
+      schema: { type: string, maxLength: 128 }
+  responses:
+    Unauthorized:
+      description: Authentification nécessaire ou session invalide.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Rôle insuffisant ou action interdite.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Ressource absente, non publiée ou non accessible au compte courant.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Conflit de version, état ou clé d’idempotence.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PreconditionFailed:
+      description: ETag ne correspond plus à la version courante.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ValidationError:
+      description: Requête mal formée ou valeur hors règles.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ValidationProblem' }
+    RateLimitError:
+      description: Limite de débit atteinte; réessayer après le délai annoncé dans Retry-After.
+      headers:
+        Retry-After:
+          schema: { type: integer, minimum: 1 }
+        RateLimit-Limit:
+          schema: { type: integer, minimum: 1 }
+        RateLimit-Remaining:
+          schema: { type: integer, minimum: 0 }
+        RateLimit-Reset:
+          schema: { type: integer, minimum: 0 }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: Corps ou fichier supérieur à la limite acceptée.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnsupportedMediaType:
+      description: Type de média non accepté. Pour les opérations JSON apprenant, tout corps dont le Content-Type n’est pas application/json est rejeté en 415 avant lecture ou validation du corps.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    FeatureDisabled:
+      description: Fonction désactivée; aucune donnée de la capacité concernée n’est acceptée, persistée ou retournée.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/FeatureDisabledProblem' }
+    Problem:
+      description: Erreur de traitement.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, traceId]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        traceId: { type: string, maxLength: 80 }
+        code: { type: string, maxLength: 80 }
+    FeatureDisabledProblem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, feature, traceId]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, const: 503 }
+        code: { type: string, const: FEATURE_DISABLED }
+        feature:
+          type: string
+          enum: [guest_quiz_session, quiz_attempt_persistence, quiz_attempt_history, imported_quiz_results, contact_storage]
+        detail: { type: string }
+        traceId: { type: string, maxLength: 80 }
+    ValidationProblem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, traceId]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        traceId: { type: string, maxLength: 80 }
+        code: { type: string, maxLength: 80 }
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+    AuthSession:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [user, csrfRequired]
+          properties:
+            user: { $ref: '#/components/schemas/CurrentUser' }
+            csrfRequired: { type: boolean }
+    ReauthenticationGrant:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [reauthenticationToken, expiresAt, singleUse]
+          properties:
+            reauthenticationToken: { type: string, minLength: 32, maxLength: 256, description: Secret rendu une fois; fournir dans AccountDeletionRequest et ne jamais journaliser. }
+            expiresAt: { type: string, format: date-time }
+            singleUse: { type: boolean, const: true }
+    AccountDeletionRequest:
+      type: object
+      additionalProperties: false
+      required: [reauthenticationToken, confirm]
+      properties:
+        reauthenticationToken: { type: string, minLength: 32, maxLength: 256, writeOnly: true }
+        confirm: { type: boolean, const: true }
+    GuestQuizSession:
+      type: object
+      description: Schéma de session différé; le endpoint de création retourne actuellement 503 et n’émet aucun token.
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [sessionToken, quizId, quizVersion, sessionId]
+          properties:
+            sessionToken: { type: string, minLength: 32, maxLength: 256, description: Secret rendu une fois; envoyer uniquement dans X-Quiz-Session et ne jamais journaliser. }
+            quizId: { type: string, format: uuid }
+            quizVersion: { type: integer, minimum: 1 }
+            sessionId: { type: string, format: uuid }
+    CurrentUser:
+      type: object
+      required: [id, email, emailVerified]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        emailVerified: { type: boolean }
+        status: { type: string, enum: [active, deletion_pending] }
+    Profile:
+      type: object
+      required: [displayName, interests, theme, resourceLanguage, learningMode, locale]
+      properties:
+        displayName: { type: [string, "null"], maxLength: 60 }
+        avatar:
+          type: object
+          additionalProperties: true
+          description: Avatar cosmétique; pas de donnée biologique ou identifiante requise.
+        interests:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items: { type: string, maxLength: 80 }
+        theme: { type: string, enum: [light, dark] }
+        resourceLanguage: { type: string, enum: [fr, en, es] }
+        learningMode: { type: string, enum: [guided, free] }
+        locale: { type: string, maxLength: 16 }
+    ProfileUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        displayName: { type: [string, "null"], maxLength: 60 }
+        avatar:
+          type: object
+          additionalProperties: true
+          maxProperties: 8
+        interests:
+          type: array
+          maxItems: 8
+          uniqueItems: true
+          items: { type: string, maxLength: 80 }
+        theme: { type: string, enum: [light, dark] }
+        resourceLanguage: { type: string, enum: [fr, en, es] }
+        learningMode: { type: string, enum: [guided, free] }
+        locale: { type: string, maxLength: 16 }
+    Domain:
+      type: object
+      required: [id, familyId, name, summary, availability]
+      properties:
+        id: { type: string, maxLength: 100 }
+        familyId: { type: string, maxLength: 80 }
+        name: { type: string, maxLength: 180 }
+        summary: { type: string, maxLength: 2000 }
+        availability: { type: string, const: published }
+        publishedAt: { type: string, format: date-time }
+    DomainDetail:
+      allOf:
+        - $ref: '#/components/schemas/Domain'
+        - type: object
+          required: [pathways]
+          properties:
+            pathways:
+              type: array
+              items: { $ref: '#/components/schemas/PathwaySummary' }
+    PathwaySummary:
+      type: object
+      required: [id, title, version, status]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string, maxLength: 180 }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, const: published }
+    Pathway:
+      type: object
+      required: [id, domainId, title, eyebrow, version, status, weeks, projects, skills, careerExamples]
+      properties:
+        id: { type: string, format: uuid }
+        domainId: { type: string, maxLength: 100 }
+        title: { type: string, maxLength: 180 }
+        eyebrow: { type: [string, "null"], maxLength: 180 }
+        description: { type: string, maxLength: 5000 }
+        overview: { type: string, maxLength: 3000 }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, const: published }
+        difficulty: { type: string, maxLength: 60 }
+        prerequisites: { type: array, items: { type: string, maxLength: 500 } }
+        equipment: { type: array, items: { type: string, maxLength: 500 } }
+        skills:
+          type: array
+          description: Compétences pédagogiques visées; libellés, sans promesse de qualification.
+          items: { type: string, maxLength: 240 }
+        careerExamples:
+          type: array
+          description: Exemples de métiers associés, sans garantie d’emploi.
+          items: { type: string, maxLength: 240 }
+        weeklyTime: { type: [string, "null"], maxLength: 120 }
+        safetyNote: { type: [string, "null"], maxLength: 2000 }
+        weeks:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/PathwayWeek' }
+        projects:
+          type: array
+          items: { $ref: '#/components/schemas/ProjectBrief' }
+        completionPolicy:
+          anyOf:
+            - $ref: '#/components/schemas/CompletionPolicy'
+            - type: "null"
+        resources:
+          type: array
+          items: { $ref: '#/components/schemas/Resource' }
+    PathwayWeek:
+      type: object
+      required: [id, position, title, lessons]
+      properties:
+        id: { type: string, maxLength: 100 }
+        position: { type: integer, minimum: 1 }
+        title: { type: string, maxLength: 180 }
+        label: { type: string, maxLength: 100 }
+        lessons:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/Lesson' }
+    Lesson:
+      type: object
+      required: [id, position, title, objective, quizzes]
+      properties:
+        id: { type: string, maxLength: 120 }
+        position: { type: integer, minimum: 1 }
+        title: { type: string, maxLength: 180 }
+        objective: { type: string, maxLength: 1000 }
+        explanation: { type: string, maxLength: 12000 }
+        activity: { type: string, maxLength: 4000 }
+        durationMinutes: { type: [integer, "null"], minimum: 1 }
+        resourceIds:
+          type: array
+          items: { type: string, format: uuid }
+        quizzes:
+          type: array
+          items: { $ref: '#/components/schemas/QuizSummary' }
+    QuizSummary:
+      type: object
+      required: [id, questionCount]
+      properties:
+        id: { type: string, format: uuid }
+        questionCount: { type: integer, minimum: 1 }
+    ProjectBrief:
+      type: object
+      required: [id, title, instructions, checklist]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string, maxLength: 180 }
+        instructions: { type: string, maxLength: 10000 }
+        checklist:
+          type: array
+          items: { $ref: '#/components/schemas/ProjectChecklistItem' }
+    ProjectChecklistItem:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, label]
+      properties:
+        stableKey: { type: string, maxLength: 100, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1 }
+        label: { type: string, maxLength: 1000 }
+    CompletionPolicy:
+      type: object
+      additionalProperties: false
+      required: [allLessonsRequired, requiredQuizIds]
+      properties:
+        allLessonsRequired: { type: boolean }
+        requiredQuizIds:
+          type: array
+          uniqueItems: true
+          items: { type: string, format: uuid }
+        minimumScorePercent:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 100
+          description: Null ou omis jusqu’à validation éditoriale d’un seuil; aucune règle de réussite ne doit être inventée.
+    Resource:
+      type: object
+      required: [id, title, url, kind, verificationStatus]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string, maxLength: 180 }
+        url: { type: string, format: uri, maxLength: 1000 }
+        provider: { type: [string, "null"], maxLength: 160 }
+        language: { type: [string, "null"], maxLength: 16 }
+        kind: { type: string, enum: [article, course, video, search, document, other] }
+        accessNote: { type: [string, "null"], maxLength: 1000 }
+        verificationStatus: { type: string, enum: [verified, unverified] }
+    SearchResult:
+      type: object
+      required: [type, id, title, availability]
+      properties:
+        type: { type: string, enum: [domain, pathway, lesson, resource] }
+        id: { type: string, maxLength: 120 }
+        title: { type: string, maxLength: 180 }
+        summary: { type: string, maxLength: 1000 }
+        domainId: { type: string, maxLength: 100 }
+        availability: { type: string, const: published }
+    Recommendation:
+      type: object
+      required: [domain, reason]
+      properties:
+        domain: { $ref: '#/components/schemas/Domain' }
+        reason: { type: string, maxLength: 300 }
+        score: { type: number, minimum: 0, maximum: 1 }
+    PublicQuiz:
+      type: object
+      additionalProperties: false
+      required: [id, lessonId, version, questions]
+      properties:
+        id: { type: string, format: uuid }
+        lessonId: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        questions:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/PublicQuestion' }
+    PublicQuestion:
+      type: object
+      additionalProperties: false
+      required: [id, prompt, options]
+      properties:
+        id: { type: string, format: uuid }
+        prompt: { type: string, maxLength: 2000 }
+        options:
+          type: array
+          minItems: 2
+          items: { $ref: '#/components/schemas/PublicOption' }
+    PublicOption:
+      type: object
+      additionalProperties: false
+      required: [id, label]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: string, maxLength: 1000 }
+    QuizAttemptRequest:
+      type: object
+      description: Schéma réservé à une éventuelle réactivation; aucun endpoint actif ne l’accepte actuellement.
+      additionalProperties: false
+      required: [quizVersion, answers]
+      properties:
+        quizVersion: { type: integer, minimum: 1 }
+        answers:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [questionId, optionId]
+            properties:
+              questionId: { type: string, format: uuid }
+              optionId: { type: string, format: uuid }
+    QuizAttemptResult:
+      type: object
+      description: Schéma de réponse différé; aucune route active ne retourne ce résultat.
+      additionalProperties: false
+      required: [id, score, maxScore, passed, submittedAt, corrections]
+      properties:
+        id: { type: string, format: uuid }
+        score: { type: integer, minimum: 0 }
+        maxScore: { type: integer, minimum: 1 }
+        passed: { type: [boolean, "null"], description: null si aucun seuil n’est configuré pour ce quiz. }
+        submittedAt: { type: string, format: date-time }
+        corrections:
+          type: array
+          items:
+            type: object
+            required: [questionId, isCorrect, explanation]
+            properties:
+              questionId: { type: string, format: uuid }
+              isCorrect: { type: boolean }
+              explanation: { type: string, maxLength: 2000 }
+              correctOptionId:
+                type: string
+                format: uuid
+                description: Peut être divulgué uniquement après la soumission et uniquement dans cette réponse de correction.
+    QuizAttemptSummary:
+      type: object
+      description: Schéma d’historique différé; aucune route active ne retourne de tentative.
+      required: [id, quizId, score, maxScore, hasIncorrectAnswers, submittedAt]
+      properties:
+        id: { type: string, format: uuid }
+        quizId: { type: string, format: uuid }
+        score: { type: integer, minimum: 0 }
+        maxScore: { type: integer, minimum: 1 }
+        hasIncorrectAnswers: { type: boolean }
+        submittedAt: { type: string, format: date-time }
+    LearnerProgress:
+      type: object
+      required: [pathways, lessonProgress, projectProgress, weeklyGoal, activeDays]
+      properties:
+        pathways: { type: array, items: { $ref: '#/components/schemas/ProgressEntry' } }
+        lessonProgress: { type: array, items: { $ref: '#/components/schemas/LessonProgress' } }
+        projectProgress: { type: array, items: { $ref: '#/components/schemas/ProjectProgress' } }
+        weeklyGoal: { $ref: '#/components/schemas/WeeklyGoal' }
+        activeDays: { type: array, items: { type: string, format: date }, maxItems: 400 }
+    ProjectProgress:
+      type: object
+      required: [projectId, status, checkedItemIds, updatedAt]
+      properties:
+        projectId: { type: string, format: uuid }
+        status: { type: string, enum: [not_started, in_progress, completed] }
+        checkedItemIds: { type: array, maxItems: 50, uniqueItems: true, items: { type: string, maxLength: 120 } }
+        url: { type: [string, "null"], format: uri, maxLength: 500 }
+        completedAt: { type: [string, "null"], format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ProgressEntry:
+      type: object
+      required: [pathwayId, status, plan, completedLessonIds]
+      properties:
+        pathwayId: { type: string, format: uuid }
+        status: { type: string, enum: [not_started, in_progress, completed, archived] }
+        plan: { type: string, enum: [two_weeks, four_weeks, eight_weeks, flex] }
+        completedLessonIds: { type: array, uniqueItems: true, items: { type: string, format: uuid } }
+        startedAt: { type: [string, "null"], format: date-time }
+        completedAt: { type: [string, "null"], format: date-time }
+    ProgressUpdate:
+      type: object
+      additionalProperties: false
+      required: [pathways]
+      properties:
+        pathways:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/ProgressEntry' }
+        projectProgress:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/ProjectProgress' }
+        weeklyGoal:
+          type: integer
+          enum: [2, 3, 5, 7]
+          description: "Entier targetDays uniquement; ne pas envoyer l’objet WeeklyGoal {targetDays, updatedAt}. Les réponses GET /me/weekly-goal et GET /me/progress contiennent l’objet WeeklyGoal."
+    LessonProgress:
+      type: object
+      required: [lessonId, status, updatedAt]
+      properties:
+        lessonId: { type: string, format: uuid }
+        status: { type: string, enum: [in_progress, completed] }
+        completedAt: { type: [string, "null"], format: date-time }
+        updatedAt: { type: string, format: date-time }
+    LearnerNote:
+      type: object
+      required: [id, lessonId, body, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        lessonId: { type: string, format: uuid }
+        body: { type: string, maxLength: 10000 }
+        updatedAt: { type: string, format: date-time }
+    SavedResource:
+      type: object
+      required: [id, url, title, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri, maxLength: 1000 }
+        title: { type: string, maxLength: 180 }
+        source: { type: [string, "null"], maxLength: 100 }
+        resourceId: { type: [string, "null"], format: uuid }
+        createdAt: { type: string, format: date-time }
+    WeeklyGoal:
+      type: object
+      additionalProperties: false
+      required: [targetDays, updatedAt]
+      properties:
+        targetDays: { type: integer, enum: [2, 3, 5, 7] }
+        updatedAt: { type: string, format: date-time }
+    GuestImportRequest:
+      description: Import limité à une allowlist des propriétés réellement stockées et normalisées par la source statique. Chaque objet est fermé; toute propriété inconnue ou champ ignoré provoque 422 et n’est jamais importé implicitement. La limite en octets est à décider avant implémentation.
+      oneOf:
+        - $ref: '#/components/schemas/GuestImportV2Request'
+        - $ref: '#/components/schemas/GuestImportLegacyRequest'
+    GuestImportV2Request:
+      type: object
+      additionalProperties: false
+      required: [clientImportId, sourceKey, state]
+      properties:
+        clientImportId: { type: string, format: uuid }
+        sourceKey: { type: string, enum: [besa.learning.v2, capClair.learning.v2] }
+        state: { $ref: '#/components/schemas/GuestImportState' }
+    GuestImportLegacyRequest:
+      type: object
+      additionalProperties: false
+      required: [clientImportId, sourceKey, completedIndexes]
+      properties:
+        clientImportId: { type: string, format: uuid }
+        sourceKey: { type: string, const: capClairCompleted }
+        completedIndexes:
+          type: array
+          maxItems: 5
+          uniqueItems: true
+          items: { type: integer, minimum: 0, maximum: 4 }
+    GuestImportState:
+      type: object
+      additionalProperties: false
+      minProperties: 2
+      description: |
+        Allowlist source-derived de defaultState()/normalizeState() version 3.
+        Cette valeur est une projection d’import construite localement, pas le JSON brut `besa.learning.v2` ou `capClair.learning.v2`.
+        Le client retire localement avant envoi `quizAnswers`, `awards`, `xp`, `coins`,
+        `avatar`, `displayName`, les noms, `birthDate`, `onboardingComplete` et les métadonnées
+        de fichiers; aucun de ces champs n’est transmis au serveur. Les propriétés présentes
+        dans cette projection mais absentes de l’allowlist sont rejetées.
+        Exclut notamment credentials, birthDate, noms, displayName, avatar,
+        notes non présentes dans ce state, files/Blobs IndexedDB, awards/xp/coins
+        recalculables et toute clé non listée. `quizResults` sont exclus de toute
+        importation serveur durable; une valeur non vide entraîne 503 pour toute
+        la requête.
+      required: [version]
+      properties:
+        version: { type: integer, const: 3 }
+        domain: { type: [string, "null"], pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        plan: { type: string, enum: [two-weeks, four-weeks, eight-weeks, flex] }
+        completed:
+          type: array
+          maxItems: 12
+          uniqueItems: true
+          items:
+            type: string
+            enum: [web-map, web-first-site, web-setup, html-structure, html-links-images, html-semantics, css-first-style, css-layout, css-responsive, js-first-steps, js-events, web-quality]
+        quizResults:
+          type: object
+          maxProperties: 250
+          description: Schéma de détection uniquement; tout objet non vide déclenche 503 FEATURE_DISABLED et annule l’import entier. Omettre ou envoyer vide pour importer les autres données.
+          propertyNames:
+            pattern: '^(?:web-map|web-first-site|web-setup|html-structure|html-links-images|html-semantics|css-first-style|css-layout|css-responsive|js-first-steps|js-events|web-quality|specialty:[a-z0-9]+(?:-[a-z0-9]+)*:[0-9]+-[0-9]+)$'
+          additionalProperties:
+            type: object
+            additionalProperties: false
+            required: [attempts, last, best, lastAnswers, questionCount]
+            properties:
+              attempts: { type: integer, minimum: 1, maximum: 10000 }
+              last: { type: integer, minimum: 0, maximum: 2 }
+              best: { type: integer, minimum: 0, maximum: 2 }
+              lastAnswers:
+                type: array
+                maxItems: 2
+                items: { type: integer, minimum: -1, maximum: 3 }
+              questionCount: { type: integer, minimum: 1, maximum: 2 }
+        specialtyProgress:
+          type: object
+          maxProperties: 250
+          propertyNames: { pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+          additionalProperties: { $ref: '#/components/schemas/GuestSessionProgress' }
+        savedResources:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            additionalProperties: false
+            required: [url, title, source]
+            properties:
+              url: { type: string, format: uri, maxLength: 1000, pattern: '^https://' }
+              title: { type: string, maxLength: 180 }
+              source: { type: string, maxLength: 100 }
+        weeklyGoal: { type: integer, enum: [2, 3, 5, 7] }
+        activityDates:
+          type: array
+          maxItems: 400
+          uniqueItems: true
+          items: { type: string, format: date }
+        project:
+          type: object
+          additionalProperties: false
+          properties:
+            checks:
+              type: array
+              maxItems: 6
+              items: { type: boolean }
+            url: { type: string, maxLength: 500, pattern: '^(https://.*)?$' }
+            completed: { type: boolean }
+        portfolio:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/GuestPortfolioItem' }
+        profile:
+          type: object
+          additionalProperties: false
+          properties:
+            interests:
+              type: array
+              maxItems: 8
+              uniqueItems: true
+              items: { type: string, enum: [digital, entreprendre-gerer, creation-medias, metiers-techniques-industrie, agriculture-environnement, sciences-ingenierie, sante-accompagnement, education-competences, droit-action-citoyenne, mobilite-accompagnement, culture] }
+            resourceLanguage: { type: string, enum: [fr, en, es] }
+            theme: { type: string, enum: [light, dark] }
+            learningMode: { type: string, enum: [guided, free] }
+    GuestSessionProgress:
+      type: array
+      maxItems: 12
+      uniqueItems: true
+      items: { type: string, pattern: '^[0-9]+-[0-9]+$' }
+    GuestPortfolioItem:
+      type: object
+      additionalProperties: false
+      required: [id, title, description, domain, date, skills, difficulties, learnings, url, visibility, createdAt]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 80 }
+        title: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, maxLength: 3000 }
+        domain: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        date: { type: string, maxLength: 20 }
+        skills: { type: string, maxLength: 500 }
+        difficulties: { type: string, maxLength: 1500 }
+        learnings: { type: string, maxLength: 1500 }
+        url: { type: string, maxLength: 500, pattern: '^(https://.*)?$' }
+        visibility: { type: string, const: private }
+        createdAt: { type: string, format: date-time, maxLength: 40 }
+    GuestImportReport:
+      type: object
+      required: [clientImportId, status, imported, skipped, conflicts, sourceRetained]
+      properties:
+        clientImportId: { type: string, format: uuid }
+        status: { type: string, enum: [applied, partial, needs_review] }
+        imported: { type: integer, minimum: 0 }
+        skipped: { type: integer, minimum: 0 }
+        conflicts: { type: integer, minimum: 0 }
+        sourceRetained: { type: boolean, const: true }
+        unresolvedStableIds: { type: array, maxItems: 100, items: { type: string, maxLength: 120 } }
+    PortfolioItemWrite:
+      type: object
+      additionalProperties: false
+      required: [title, description]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, minLength: 1, maxLength: 3000 }
+        domainId: { type: [string, "null"], maxLength: 100 }
+        projectDate: { type: [string, "null"], format: date }
+        skills: { type: string, maxLength: 500 }
+        difficulties: { type: string, maxLength: 1500 }
+        learnings: { type: string, maxLength: 1500 }
+        url: { type: string, format: uri, maxLength: 500, description: HTTPS seulement; pas de contenu public par défaut. }
+    PortfolioItemPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, minLength: 1, maxLength: 3000 }
+        domainId: { type: [string, "null"], maxLength: 100 }
+        projectDate: { type: [string, "null"], format: date }
+        skills: { type: string, maxLength: 500 }
+        difficulties: { type: string, maxLength: 1500 }
+        learnings: { type: string, maxLength: 1500 }
+        url: { type: [string, "null"], format: uri, maxLength: 500, description: HTTPS seulement; null retire le lien. }
+    PortfolioItem:
+      type: object
+      additionalProperties: false
+      required: [id, title, description, domainId, projectDate, skills, difficulties, learnings, url, visibility, createdAt, updatedAt, attachments]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, minLength: 1, maxLength: 3000 }
+        domainId: { type: [string, "null"], maxLength: 100 }
+        projectDate: { type: [string, "null"], format: date }
+        skills: { type: [string, "null"], maxLength: 500 }
+        difficulties: { type: [string, "null"], maxLength: 1500 }
+        learnings: { type: [string, "null"], maxLength: 1500 }
+        url: { type: [string, "null"], format: uri, maxLength: 500, description: HTTPS seulement; pas de contenu public par défaut. }
+        visibility: { type: string, const: private }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        attachments: { type: array, maxItems: 2, items: { $ref: '#/components/schemas/PortfolioAttachment' } }
+    PortfolioAttachment:
+      type: object
+      description: >-
+        Métadonnées privées; le contenu se télécharge via
+        /me/portfolio/{itemId}/attachments/{attachmentId}/content, credentials:
+        include ou navigation first-party. Aucun lien de téléchargement ni URL
+        de stockage n’est sérialisé. Taille positive, plafonnée à 5 242 880
+        octets pour application/pdf et à 2 097 152 octets pour chaque média image.
+      required: [id, name, mediaType, sizeBytes, createdAt]
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 160, description: Nom d’affichage sûr dérivé du nom de fichier après normalisation et neutralisation; jamais le nom original brut. }
+        mediaType: { type: string, enum: [application/pdf, image/jpeg, image/png, image/webp] }
+        sizeBytes: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+      allOf:
+        - if:
+            properties:
+              mediaType: { const: application/pdf }
+            required: [mediaType]
+          then:
+            properties:
+              sizeBytes: { maximum: 5242880 }
+        - if:
+            properties:
+              mediaType:
+                enum: [image/jpeg, image/png, image/webp]
+            required: [mediaType]
+          then:
+            properties:
+              sizeBytes: { maximum: 2097152 }
+    ReminderPreferences:
+      type: object
+      required: [enabled, frequency]
+      properties:
+        enabled: { type: boolean, default: false }
+        frequency: { type: string, enum: [weekly] }
+        timezone: { type: [string, "null"], maxLength: 64 }
+        preferredWeekday: { type: [integer, "null"], minimum: 0, maximum: 6 }
+        consentedAt: { type: [string, "null"], format: date-time }
+    AdminDomainWrite:
+      type: object
+      additionalProperties: false
+      required: [id, familyId, name, summary, sourceIds]
+      properties:
+        id: { type: string, maxLength: 100, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        familyId: { type: string, maxLength: 80 }
+        name: { type: string, minLength: 1, maxLength: 180 }
+        summary: { type: string, maxLength: 2000 }
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+    AdminDomainPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 180 }
+        summary: { type: string, maxLength: 2000 }
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+    AdminDomain:
+      type: object
+      additionalProperties: false
+      required: [id, familyId, name, summary, availability, contentStatus, sourceIds, updatedAt]
+      properties:
+        id: { type: string, maxLength: 100 }
+        familyId: { type: string, maxLength: 80 }
+        name: { type: string, maxLength: 180 }
+        summary: { type: string, maxLength: 2000 }
+        availability: { type: string, enum: [preparing, published, archived] }
+        contentStatus: { type: string, enum: [draft, in_review, approved, published, archived] }
+        sourceIds: { type: array, items: { type: string, format: uuid } }
+        updatedAt: { type: string, format: date-time }
+    AdminPathwayWrite:
+      type: object
+      additionalProperties: false
+      required: [domainId, stableKey, title, version, sourceIds]
+      properties:
+        domainId: { type: string, maxLength: 100 }
+        stableKey: { type: string, minLength: 1, maxLength: 120, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        title: { type: string, minLength: 1, maxLength: 180 }
+        eyebrow: { type: [string, "null"], maxLength: 180 }
+        version: { type: integer, minimum: 1 }
+        description: { type: [string, "null"], maxLength: 5000 }
+        overview: { type: [string, "null"], maxLength: 3000 }
+        difficulty: { type: [string, "null"], maxLength: 60 }
+        prerequisites: { type: array, items: { type: string, maxLength: 500 } }
+        equipment: { type: array, items: { type: string, maxLength: 500 } }
+        skills: { type: array, items: { type: string, minLength: 1, maxLength: 240 } }
+        careerExamples: { type: array, items: { type: string, minLength: 1, maxLength: 240 } }
+        weeklyTime: { type: [string, "null"], maxLength: 120 }
+        safetyNote: { type: string, maxLength: 2000 }
+        completionPolicy:
+          anyOf:
+            - $ref: '#/components/schemas/CompletionPolicy'
+            - type: "null"
+        projectBriefs:
+          type: array
+          description: Liste initiale optionnelle de briefs de projet; chaque élément doit respecter le schéma complet.
+          items: { $ref: '#/components/schemas/AdminProjectBriefWrite' }
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+    AdminPathwayPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title: { type: string, minLength: 1, maxLength: 180 }
+        eyebrow: { type: [string, "null"], maxLength: 180 }
+        description: { type: [string, "null"], maxLength: 5000 }
+        overview: { type: [string, "null"], maxLength: 3000 }
+        difficulty: { type: [string, "null"], maxLength: 60 }
+        prerequisites: { type: array, items: { type: string, maxLength: 500 } }
+        equipment: { type: array, items: { type: string, maxLength: 500 } }
+        skills: { type: array, items: { type: string, minLength: 1, maxLength: 240 } }
+        careerExamples: { type: array, items: { type: string, minLength: 1, maxLength: 240 } }
+        weeklyTime: { type: [string, "null"], maxLength: 120 }
+        safetyNote: { type: [string, "null"], maxLength: 2000 }
+        completionPolicy:
+          anyOf:
+            - $ref: '#/components/schemas/CompletionPolicy'
+            - type: "null"
+        projectBriefs:
+          type: array
+          description: Remplacement complet sur un parcours brouillon; une stableKey existante conserve son UUID, les briefs absents sont archivés s’ils sont référencés par une progression.
+          items: { $ref: '#/components/schemas/AdminProjectBriefWrite' }
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+    AdminPathway:
+      type: object
+      additionalProperties: false
+      required: [id, domainId, stableKey, title, eyebrow, version, status, description, overview, difficulty, prerequisites, equipment, skills, careerExamples, weeklyTime, safetyNote, completionPolicy, sourceIds, projectBriefs, generation, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        domainId: { type: string, maxLength: 100 }
+        stableKey: { type: string, maxLength: 120 }
+        title: { type: string, maxLength: 180 }
+        eyebrow: { type: [string, "null"], maxLength: 180 }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [draft, in_review, published, archived] }
+        description: { type: [string, "null"], maxLength: 5000 }
+        overview: { type: [string, "null"], maxLength: 3000 }
+        difficulty: { type: [string, "null"], maxLength: 60 }
+        prerequisites: { type: array, items: { type: string, maxLength: 500 } }
+        equipment: { type: array, items: { type: string, maxLength: 500 } }
+        skills: { type: array, items: { type: string, maxLength: 240 } }
+        careerExamples: { type: array, items: { type: string, maxLength: 240 } }
+        weeklyTime: { type: [string, "null"], maxLength: 120 }
+        safetyNote: { type: [string, "null"], maxLength: 2000 }
+        completionPolicy:
+          anyOf:
+            - $ref: '#/components/schemas/CompletionPolicy'
+            - type: "null"
+        sourceIds: { type: array, items: { type: string, format: uuid } }
+        projectBriefs: { type: array, items: { $ref: '#/components/schemas/AdminProjectBrief' } }
+        generation:
+          anyOf:
+            - $ref: '#/components/schemas/PathwayGeneration'
+            - type: "null"
+        updatedAt: { type: string, format: date-time }
+    PathwayGeneration:
+      type: object
+      additionalProperties: false
+      required: [templateId, familyId, templateVersion, generationKey, generationChecksum, topics]
+      properties:
+        templateId: { type: string, format: uuid }
+        familyId: { type: string, maxLength: 80 }
+        templateVersion: { type: integer, minimum: 1 }
+        generationKey: { type: string, minLength: 64, maxLength: 64, pattern: '^[a-fA-F0-9]{64}$' }
+        generationChecksum: { type: string, pattern: '^[a-fA-F0-9]{64}$' }
+        topics:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items:
+            type: object
+            additionalProperties: false
+            required: [weekPosition, topic, topicSource, sourceId]
+            properties:
+              weekPosition: { type: integer, minimum: 1, maximum: 4 }
+              topic: { type: string, maxLength: 300 }
+              topicSource: { type: string, enum: [domain_override, template_title] }
+              sourceId: { type: string, format: uuid }
+    AdminFamilyPathwayTemplateWrite:
+      type: object
+      additionalProperties: false
+      required: [familyId, stableKey, version, skills, careerExamples, projectTextTemplate, projectTopicsSuffixTemplate, weeks, domainTopicOverrides, domainTopicAliasSources, sourceIds]
+      properties:
+        familyId: { type: string, maxLength: 80 }
+        stableKey: { type: string, minLength: 1, maxLength: 120, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        version: { type: integer, minimum: 1 }
+        skills:
+          type: array
+          minItems: 1
+          items: { type: string, minLength: 1, maxLength: 240 }
+        careerExamples:
+          type: array
+          minItems: 1
+          items: { type: string, minLength: 1, maxLength: 240 }
+        projectTextTemplate: { type: string, minLength: 1, maxLength: 10000, description: "Texte source; seul le token littéral {domain_name} est substituable." }
+        projectTopicsSuffixTemplate: { type: string, maxLength: 2000, description: "Suffixe source; token littéral {topics}, thèmes séparés par « ; » dans l'ordre des semaines." }
+        weeks:
+          type: array
+          description: Exactement quatre semaines, positions 1 à 4 uniques et contiguës.
+          minItems: 4
+          maxItems: 4
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateWeekWrite' }
+        domainTopicOverrides:
+          type: array
+          description: Overrides canoniques seulement; au plus un par domainId; quatre topics ordonnés. Alias-source exclus.
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateDomainTopicsWrite' }
+        domainTopicAliasSources:
+          type: array
+          description: Observations source séparées; clé+semaine uniques, elles pointent vers un override canonique et ne créent pas de doublon.
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateDomainTopicAliasSourceWrite' }
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+    AdminFamilyPathwayTemplatePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        skills:
+          type: array
+          minItems: 1
+          items: { type: string, minLength: 1, maxLength: 240 }
+        careerExamples:
+          type: array
+          minItems: 1
+          items: { type: string, minLength: 1, maxLength: 240 }
+        projectTextTemplate: { type: string, minLength: 1, maxLength: 10000 }
+        projectTopicsSuffixTemplate: { type: string, maxLength: 2000 }
+        weeks:
+          type: array
+          description: Remplacement complet des quatre semaines modèles; source keys stables conservées ou version nouvelle.
+          minItems: 4
+          maxItems: 4
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateWeekWrite' }
+        domainTopicOverrides:
+          type: array
+          description: Remplacement complet de la collection d'overrides du brouillon.
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateDomainTopicsWrite' }
+        domainTopicAliasSources:
+          type: array
+          description: Remplacement complet des observations alias-source du brouillon; chaque paire sourceKey/semaine est préservée séparément.
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateDomainTopicAliasSourceWrite' }
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+    AdminFamilyTemplateWeekWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, title, explanation, exercise, sourceQuestionPrompt, options, sourceQuestionAnswerIndex, correctOptionStableKey, feedback, stages]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1, maximum: 4 }
+        title: { type: string, minLength: 1, maxLength: 500 }
+        explanation: { type: string, minLength: 1, maxLength: 5000 }
+        exercise: { type: string, minLength: 1, maxLength: 5000 }
+        sourceQuestionPrompt: { type: string, minLength: 1, maxLength: 2000 }
+        options:
+          type: array
+          description: Options source distinctes, ordonnées par position; sourceQuestionAnswerIndex est zéro-based.
+          minItems: 2
+          maxItems: 20
+          items: { $ref: '#/components/schemas/AdminTemplateOptionWrite' }
+        sourceQuestionAnswerIndex: { type: integer, minimum: 0, description: Zero-based answer index as stored in the source array; must match the option identified as correct. }
+        correctOptionStableKey: { type: string, minLength: 1, maxLength: 100, description: Must identify exactly the option at sourceQuestionAnswerIndex; it is the relational correction reference. }
+        feedback: { type: string, minLength: 1, maxLength: 2000 }
+        stages:
+          type: array
+          description: Trois étapes, positions uniques et contiguës de 1 à 3.
+          minItems: 3
+          maxItems: 3
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateStageWrite' }
+    AdminFamilyTemplateStageWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, titleTemplate, objectiveTemplate, exerciseTemplate, quizPromptTemplate]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1, maximum: 3 }
+        titleTemplate: { type: string, minLength: 1, maxLength: 500, description: "Token autorisé : {topic}." }
+        objectiveTemplate: { type: string, minLength: 1, maxLength: 2000, description: "Tokens autorisés : {topic}, {domain_name}." }
+        exerciseTemplate: { type: string, minLength: 1, maxLength: 5000, description: "Tokens autorisés : {topic}, {domain_name}, {week_explanation}, {week_exercise}." }
+        quizPromptTemplate: { type: string, minLength: 1, maxLength: 2000, description: "Tokens autorisés : {topic}, {domain_name}." }
+    AdminTemplateOptionWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, label]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1, maximum: 20 }
+        label: { type: string, minLength: 1, maxLength: 1000 }
+    AdminFamilyTemplateDomainTopicsWrite:
+      type: object
+      additionalProperties: false
+      required: [domainId, topics, sourceId]
+      properties:
+        domainId: { type: string, maxLength: 100 }
+        sourceId: { type: string, format: uuid }
+        topics:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: string, minLength: 1, maxLength: 300 }
+    AdminFamilyTemplateDomainTopicAliasSourceWrite:
+      type: object
+      additionalProperties: false
+      required: [sourceKey, weekPosition, sourceTopic, canonicalDomainId, canonicalOverrideKey, sourceId]
+      properties:
+        sourceKey: { type: string, minLength: 1, maxLength: 100, description: "Clé exacte, y compris les clés BesaDomainTracks alias-source." }
+        weekPosition: { type: integer, minimum: 1, maximum: 4 }
+        sourceTopic: { type: string, minLength: 1, maxLength: 300 }
+        canonicalDomainId: { type: string, maxLength: 100 }
+        canonicalOverrideKey: { type: string, minLength: 1, maxLength: 180, description: "Stable key exact `{canonicalDomainId}:week-{weekPosition}`; plusieurs source alias peuvent pointer vers la même clé. Le serveur vérifie l’égalité du topic avant de qualifier identical." }
+        sourceId: { type: string, format: uuid }
+    AdminFamilyPathwayTemplate:
+      type: object
+      additionalProperties: false
+      required: [id, familyId, stableKey, version, status, skills, careerExamples, projectTextTemplate, projectTopicsSuffixTemplate, weeks, domainTopicOverrides, domainTopicAliasSources, sourceIds, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        familyId: { type: string, maxLength: 80 }
+        stableKey: { type: string, maxLength: 120 }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [draft, in_review, approved, published, archived] }
+        skills: { type: array, items: { type: string, maxLength: 240 } }
+        careerExamples: { type: array, items: { type: string, maxLength: 240 } }
+        projectTextTemplate: { type: string, maxLength: 10000 }
+        projectTopicsSuffixTemplate: { type: string, maxLength: 2000 }
+        weeks:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateWeek' }
+        domainTopicOverrides:
+          type: array
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateDomainTopics' }
+        domainTopicAliasSources:
+          type: array
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateDomainTopicAliasSource' }
+        sourceIds: { type: array, items: { type: string, format: uuid } }
+        updatedAt: { type: string, format: date-time }
+    AdminFamilyTemplateWeek:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, title, explanation, exercise, sourceQuestionPrompt, options, correctOptionStableKey, feedback, stages, sourceQuestionAnswerIndex]
+      properties:
+        stableKey: { type: string, maxLength: 100 }
+        position: { type: integer, minimum: 1, maximum: 4 }
+        title: { type: string, maxLength: 500 }
+        explanation: { type: string, maxLength: 5000 }
+        exercise: { type: string, maxLength: 5000 }
+        sourceQuestionPrompt: { type: string, maxLength: 2000 }
+        options:
+          type: array
+          minItems: 2
+          maxItems: 20
+          items: { $ref: '#/components/schemas/AdminTemplateOptionWrite' }
+        correctOptionStableKey: { type: string, maxLength: 100 }
+        feedback: { type: string, maxLength: 2000 }
+        stages:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: { $ref: '#/components/schemas/AdminFamilyTemplateStageWrite' }
+        sourceQuestionAnswerIndex:
+          type: integer
+          minimum: 0
+          description: Index source zéro-based; la relation d'option correcte est résolue par correctOptionStableKey.
+    AdminFamilyTemplateDomainTopics:
+      type: object
+      additionalProperties: false
+      required: [domainId, topics, sourceId]
+      properties:
+        domainId: { type: string, maxLength: 100 }
+        sourceId: { type: string, format: uuid }
+        topics:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: string, maxLength: 300 }
+    AdminFamilyTemplateDomainTopicAliasSource:
+      type: object
+      additionalProperties: false
+      required: [sourceKey, weekPosition, sourceTopic, canonicalDomainId, canonicalOverrideKey, sourceId, topicMatch]
+      properties:
+        sourceKey: { type: string, maxLength: 100 }
+        weekPosition: { type: integer, minimum: 1, maximum: 4 }
+        sourceTopic: { type: string, maxLength: 300 }
+        canonicalDomainId: { type: string, maxLength: 100 }
+        canonicalOverrideKey: { type: string, maxLength: 180, description: "Stable key `{canonicalDomainId}:week-{weekPosition}` de la ligne d’override référencée." }
+        sourceId: { type: string, format: uuid }
+        topicMatch: { type: string, enum: [identical, review_required] }
+    AdminProjectBriefWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, title, instructions, checklist]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 120, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1 }
+        title: { type: string, minLength: 1, maxLength: 180 }
+        instructions: { type: string, minLength: 1, maxLength: 10000 }
+        checklist:
+          type: array
+          items: { $ref: '#/components/schemas/AdminProjectChecklistItemWrite' }
+    AdminProjectBrief:
+      type: object
+      additionalProperties: false
+      required: [id, stableKey, position, title, instructions, checklist, status]
+      properties:
+        id: { type: string, format: uuid }
+        stableKey: { type: string, maxLength: 120, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1 }
+        title: { type: string, maxLength: 180 }
+        instructions: { type: string, maxLength: 10000 }
+        checklist:
+          type: array
+          items: { $ref: '#/components/schemas/ProjectChecklistItem' }
+        status: { type: string, enum: [draft, published, archived] }
+    AdminProjectChecklistItemWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, label]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1 }
+        label: { type: string, minLength: 1, maxLength: 1000 }
+    AdminWeekWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, title]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 100, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1 }
+        title: { type: string, minLength: 1, maxLength: 180 }
+        label: { type: string, maxLength: 100 }
+    AdminWeekPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        position: { type: integer, minimum: 1 }
+        title: { type: string, minLength: 1, maxLength: 180 }
+        label: { type: [string, "null"], maxLength: 100 }
+    AdminWeek:
+      type: object
+      additionalProperties: false
+      required: [id, pathwayId, stableKey, position, title]
+      properties:
+        id: { type: string, format: uuid }
+        pathwayId: { type: string, format: uuid }
+        stableKey: { type: string, maxLength: 100 }
+        position: { type: integer, minimum: 1 }
+        title: { type: string, maxLength: 180 }
+        label: { type: [string, "null"], maxLength: 100 }
+    AdminLessonWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, title, objective, sourceIds]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 120, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1 }
+        title: { type: string, minLength: 1, maxLength: 180 }
+        objective: { type: string, minLength: 1, maxLength: 1000 }
+        explanation: { type: string, maxLength: 12000 }
+        activity: { type: string, maxLength: 4000 }
+        durationMinutes: { type: integer, minimum: 1 }
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+    AdminLessonPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        position: { type: integer, minimum: 1 }
+        title: { type: string, minLength: 1, maxLength: 180 }
+        objective: { type: string, minLength: 1, maxLength: 1000 }
+        explanation: { type: string, maxLength: 12000 }
+        activity: { type: string, maxLength: 4000 }
+        durationMinutes: { type: [integer, "null"], minimum: 1 }
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+    AdminLesson:
+      type: object
+      additionalProperties: false
+      required: [id, weekId, stableKey, position, title, objective, resourceIds, quizIds, sourceIds]
+      properties:
+        id: { type: string, format: uuid }
+        weekId: { type: string, format: uuid }
+        stableKey: { type: string, maxLength: 120 }
+        position: { type: integer, minimum: 1 }
+        title: { type: string, maxLength: 180 }
+        objective: { type: string, maxLength: 1000 }
+        explanation: { type: [string, "null"], maxLength: 12000 }
+        activity: { type: [string, "null"], maxLength: 4000 }
+        durationMinutes: { type: [integer, "null"], minimum: 1 }
+        resourceIds: { type: array, items: { type: string, format: uuid } }
+        quizIds: { type: array, items: { type: string, format: uuid } }
+        sourceIds: { type: array, items: { type: string, format: uuid } }
+    AdminQuizWrite:
+      type: object
+      additionalProperties: false
+      required: [lessonId, stableKey, version, sourceIds]
+      properties:
+        lessonId: { type: string, format: uuid }
+        stableKey: { type: string, minLength: 1, maxLength: 120, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        version: { type: integer, minimum: 1 }
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+        passScore: { type: [integer, "null"], minimum: 0 }
+    AdminQuizPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        sourceIds: { type: array, minItems: 1, uniqueItems: true, items: { type: string, format: uuid } }
+        passScore: { type: [integer, "null"], minimum: 0 }
+    AdminQuiz:
+      type: object
+      additionalProperties: false
+      required: [id, lessonId, stableKey, version, status, passScore, sourceIds, questions]
+      properties:
+        id: { type: string, format: uuid }
+        lessonId: { type: string, format: uuid }
+        stableKey: { type: string, maxLength: 120 }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [draft, published, archived] }
+        passScore: { type: [integer, "null"], minimum: 0 }
+        sourceIds: { type: array, items: { type: string, format: uuid } }
+        questions:
+          type: array
+          items: { $ref: '#/components/schemas/AdminQuestion' }
+    AdminQuestionWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, prompt, explanation, options]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 120, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1 }
+        prompt: { type: string, minLength: 1, maxLength: 2000 }
+        explanation: { type: string, minLength: 1, maxLength: 2000 }
+        points: { type: integer, minimum: 1, maximum: 100, default: 1 }
+        options:
+          type: array
+          description: Remplacement complet de toutes les options de la question; chaque option doit respecter le schéma complet.
+          minItems: 2
+          maxItems: 20
+          items: { $ref: '#/components/schemas/AdminOptionWrite' }
+    AdminQuestionPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        position: { type: integer, minimum: 1 }
+        prompt: { type: string, minLength: 1, maxLength: 2000 }
+        explanation: { type: string, minLength: 1, maxLength: 2000 }
+        points: { type: integer, minimum: 1, maximum: 100 }
+        options:
+          type: array
+          description: Remplacement complet de toutes les options de la question; chaque option doit respecter le schéma complet.
+          minItems: 2
+          maxItems: 20
+          items: { $ref: '#/components/schemas/AdminOptionWrite' }
+    AdminOptionWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, position, label, isCorrect]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 120, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        position: { type: integer, minimum: 1 }
+        label: { type: string, minLength: 1, maxLength: 1000 }
+        isCorrect: { type: boolean, description: Champ privé de l’édition; exactement une option vraie après validation complète. }
+    AdminQuestion:
+      type: object
+      additionalProperties: false
+      required: [id, quizId, stableKey, position, prompt, explanation, points, options]
+      properties:
+        id: { type: string, format: uuid }
+        quizId: { type: string, format: uuid }
+        stableKey: { type: string, maxLength: 120 }
+        position: { type: integer, minimum: 1 }
+        prompt: { type: string, maxLength: 2000 }
+        explanation: { type: string, maxLength: 2000 }
+        points: { type: integer, minimum: 1 }
+        options:
+          type: array
+          items: { $ref: '#/components/schemas/AdminOption' }
+    AdminOption:
+      type: object
+      additionalProperties: false
+      required: [id, stableKey, position, label, isCorrect]
+      properties:
+        id: { type: string, format: uuid }
+        stableKey: { type: string, maxLength: 120 }
+        position: { type: integer, minimum: 1 }
+        label: { type: string, maxLength: 1000 }
+        isCorrect: { type: boolean }
+    ContentSourceWrite:
+      type: object
+      additionalProperties: false
+      required: [sourcePath, sourceKey, extractedAt, licenseStatus]
+      properties:
+        sourcePath: { type: string, minLength: 1, maxLength: 500 }
+        sourceKey: { type: string, maxLength: 200 }
+        sourceRevision: { type: string, maxLength: 100 }
+        sourceChecksum: { type: string, pattern: '^[a-fA-F0-9]{64}$' }
+        extractedAt: { type: string, format: date-time }
+        licenseStatus: { type: string, enum: [unknown, review_required], description: Une source créée ne peut jamais être approuvée/rejetée par content_editor; la décision passe par reviewContentSource. }
+        attribution: { type: string, maxLength: 1000 }
+        notes: { type: string, maxLength: 2000 }
+    ContentSourceReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision: { type: string, enum: [approved, rejected] }
+        notes: { type: [string, "null"], maxLength: 2000 }
+    ContentSource:
+      type: object
+      additionalProperties: false
+      description: Pour `approved` ou `rejected`, reviewedBy et reviewedAt sont obligatoires par invariant serveur et proviennent de la transition content_approver.
+      required: [id, sourcePath, sourceKey, sourceRevision, sourceChecksum, extractedAt, licenseStatus, attribution, notes, reviewedBy, reviewedAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        sourcePath: { type: string, maxLength: 500 }
+        sourceKey: { type: [string, "null"], maxLength: 200 }
+        sourceRevision: { type: [string, "null"], maxLength: 100 }
+        sourceChecksum: { type: [string, "null"], pattern: '^[a-fA-F0-9]{64}$' }
+        extractedAt: { type: string, format: date-time }
+        licenseStatus: { type: string, enum: [unknown, review_required, approved, rejected] }
+        attribution: { type: [string, "null"], maxLength: 1000 }
+        notes: { type: [string, "null"], maxLength: 2000 }
+        reviewedBy: { type: [string, "null"], format: uuid, readOnly: true, description: "ID du reviewer Sanctum, jamais fourni par le client." }
+        reviewedAt: { type: [string, "null"], format: date-time, readOnly: true, description: Horodatage serveur de la décision. }
+        createdAt: { type: string, format: date-time }
+    AdminResourceWrite:
+      type: object
+      additionalProperties: false
+      required: [stableKey, title, url, kind, sourceId]
+      allOf:
+        - anyOf:
+            - required: [domainId]
+            - required: [pathwayId]
+            - required: [lessonId]
+      properties:
+        stableKey: { type: string, minLength: 1, maxLength: 120, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
+        domainId: { type: string, maxLength: 100 }
+        pathwayId: { type: string, format: uuid }
+        lessonId: { type: string, format: uuid }
+        title: { type: string, minLength: 1, maxLength: 180 }
+        url: { type: string, format: uri, maxLength: 1000, description: HTTP ou HTTPS; les domaines privés et URL locales sont interdits. }
+        provider: { type: string, maxLength: 160 }
+        language: { type: string, maxLength: 16 }
+        kind: { type: string, enum: [article, course, video, search, document, other] }
+        accessNote: { type: string, maxLength: 1000 }
+        verificationStatus: { type: string, enum: [unverified, verified, unavailable] }
+        sourceId: { type: string, format: uuid }
+    AdminResourcePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title: { type: string, minLength: 1, maxLength: 180 }
+        url: { type: string, format: uri, maxLength: 1000 }
+        provider: { type: [string, "null"], maxLength: 160 }
+        language: { type: [string, "null"], maxLength: 16 }
+        kind: { type: string, enum: [article, course, video, search, document, other] }
+        accessNote: { type: [string, "null"], maxLength: 1000 }
+        verificationStatus: { type: string, enum: [unverified, verified, unavailable] }
+        sourceId: { type: string, format: uuid }
+    AdminResource:
+      type: object
+      additionalProperties: false
+      required: [id, stableKey, domainId, pathwayId, lessonId, title, url, provider, language, kind, accessNote, status, verificationStatus, sourceId, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        stableKey: { type: string, maxLength: 120 }
+        domainId: { type: [string, "null"], maxLength: 100 }
+        pathwayId: { type: [string, "null"], format: uuid }
+        lessonId: { type: [string, "null"], format: uuid }
+        title: { type: string, maxLength: 180 }
+        url: { type: string, format: uri, maxLength: 1000 }
+        provider: { type: [string, "null"], maxLength: 160 }
+        language: { type: [string, "null"], maxLength: 16 }
+        kind: { type: string, enum: [article, course, video, search, document, other] }
+        accessNote: { type: [string, "null"], maxLength: 1000 }
+        status: { type: string, enum: [draft, published, archived] }
+        verificationStatus: { type: string, enum: [unverified, verified, unavailable] }
+        sourceId: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    AdminContact:
+      type: object
+      description: Schéma futur uniquement; aucun endpoint actif ne retourne une demande de contact.
+      required: [id, subject, message, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: [string, "null"], maxLength: 100 }
+        email: { type: [string, "null"], format: email, maxLength: 254 }
+        phone: { type: [string, "null"], maxLength: 26 }
+        subject: { type: string, enum: [pathway, technical, suggestion, other] }
+        message: { type: string, maxLength: 5000 }
+        status: { type: string, enum: [new, triaged, replied, closed, spam] }
+        createdAt: { type: string, format: date-time }
+    PageMeta:
+      type: object
+      required: [limit, hasMore]
+      properties:
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        hasMore: { type: boolean }
+        nextCursor: { type: [string, "null"], maxLength: 512 }
