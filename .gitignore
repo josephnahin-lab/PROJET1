@@ -1,0 +1,2 @@
+# Fichier d’environnement local; conserver .env.example versionné.
+.env
